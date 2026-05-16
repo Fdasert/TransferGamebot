@@ -60,9 +60,10 @@ def main_menu_kb() -> InlineKeyboardMarkup:
 
 def play_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⚔️ Вызов игрока", callback_data="play_challenge")],
+        [InlineKeyboardButton("⚔️ Вызов игрока",      callback_data="play_challenge")],
         [InlineKeyboardButton("🎲 Случайный соперник", callback_data="play_random")],
-        [InlineKeyboardButton("← Назад", callback_data="menu_back")],
+        [InlineKeyboardButton("🤖 Тренировка",         callback_data="play_training")],
+        [InlineKeyboardButton("← Назад",               callback_data="menu_back")],
     ])
 
 
@@ -772,8 +773,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_challenge_username(update, ctx, text)
     elif action == "guessing":
         await _handle_guess(update, ctx, text, data)
+    elif action == "training_guessing":
+        await _handle_training_guess(update, ctx, text, data)
+    elif action in ("dbg_lookup_user", "dbg_set_coins", "dbg_set_rating"):
+        if _is_superadmin(user_id):
+            await _handle_dbg_input(update, ctx, action, data)
     else:
-        # No active state — show menu hint
         await update.message.reply_text(
             "Используй меню ниже 👇", reply_markup=main_menu_kb()
         )
@@ -1238,36 +1243,610 @@ async def cb_game_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     await q.edit_message_text("Действие отменено.", reply_markup=main_menu_kb())
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Debug panel (superadmin only) ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _is_superadmin(user_id: int) -> bool:
+    from config import SUPERADMIN_IDS
+    return user_id in SUPERADMIN_IDS
+
+
+def debug_main_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Найти игрока", callback_data="dbg_lookup")],
+        [InlineKeyboardButton("← Меню", callback_data="menu_back")],
+    ])
+
+
+def debug_user_kb(uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Изменить монеты",  callback_data=f"dbg_coins_{uid}"),
+         InlineKeyboardButton("🏅 Изменить рейтинг", callback_data=f"dbg_rating_{uid}")],
+        [InlineKeyboardButton("🔄 Сбросить калибровку", callback_data=f"dbg_resetcal_{uid}")],
+        [InlineKeyboardButton("🗑 Очистить состояние",  callback_data=f"dbg_clearstate_{uid}")],
+        [InlineKeyboardButton("← Назад", callback_data="dbg_back")],
+    ])
+
+
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_superadmin(update.effective_user.id):
+        return
+    await set_state(update.effective_user.id, "dbg_main", {})
+    await update.message.reply_text(
+        "🛠 *Дебаг панель*",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=debug_main_kb(),
+    )
+
+
+async def cb_dbg_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    await set_state(q.from_user.id, "dbg_lookup_user", {})
+    await q.edit_message_text(
+        "🔍 Введи *@username* игрока:",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="dbg_back")]]),
+    )
+
+
+async def cb_dbg_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await set_state(q.from_user.id, "dbg_main", {})
+    await q.edit_message_text("🛠 *Дебаг панель*", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=debug_main_kb())
+
+
+def _user_dbg_text(user: dict) -> str:
+    return (
+        f"👤 *{_esc(user['display_name'])}* \\(@{_esc(user.get('username') or '—')}\\)\n"
+        f"🆔 ID: `{user['user_id']}`\n"
+        f"🏅 Рейтинг: *{user['rating']}*\n"
+        f"🪙 Монеты: *{user.get('coins', 0)}*\n"
+        f"🎮 Игр: {user.get('games_played',0)} \\| ✅ {user.get('wins',0)} \\| ❌ {user.get('losses',0)}\n"
+        f"🔄 Калибровка: {user.get('calibration_games',0)}/10 "
+        f"\\({'✅' if user.get('is_calibrated') else '⏳'}\\)"
+    )
+
+
+async def cb_dbg_coins(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    await set_state(q.from_user.id, "dbg_set_coins", {"target_uid": uid})
+    await q.edit_message_text(
+        "💰 Введи количество монет \\(положительное — добавить, отрицательное — снять\\):\n"
+        "_Например: 100 или \\-50_",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="dbg_back")]]),
+    )
+
+
+async def cb_dbg_rating(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    await set_state(q.from_user.id, "dbg_set_rating", {"target_uid": uid})
+    await q.edit_message_text(
+        "🏅 Введи новое значение рейтинга или изменение:\n"
+        "_Например: 1500 \\(установить\\) или \\+100 или \\-50_",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="dbg_back")]]),
+    )
+
+
+async def cb_dbg_resetcal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    db.update_user(uid, is_calibrated=False, calibration_games=0)
+    target = db.get_user(uid)
+    await q.edit_message_text(
+        f"✅ Калибровка сброшена\\.\n\n{_user_dbg_text(target)}",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=debug_user_kb(uid),
+    )
+
+
+async def cb_dbg_clearstate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    db.clear_pending_action(uid)
+    await q.answer("✅ Состояние очищено", show_alert=True)
+
+
+async def _handle_dbg_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action: str, data: dict) -> None:
+    """Handle text input for debug states."""
+    text = update.message.text.strip()
+    admin_id = update.effective_user.id
+
+    if action == "dbg_lookup_user":
+        target = db.get_user_by_username(text.lstrip("@"))
+        if not target:
+            await update.message.reply_text(f"❌ Игрок *{_esc(text)}* не найден\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        await set_state(admin_id, "dbg_main", {})
+        await update.message.reply_text(
+            _user_dbg_text(target),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=debug_user_kb(target["user_id"]),
+        )
+
+    elif action == "dbg_set_coins":
+        uid = data["target_uid"]
+        try:
+            amount = int(text.replace("+", ""))
+        except ValueError:
+            await update.message.reply_text("❌ Введи число, например: 100 или -50")
+            return
+        target = db.get_user(uid)
+        new_coins = max(0, target.get("coins", 0) + amount)
+        db.update_user(uid, coins=new_coins)
+        target = db.get_user(uid)
+        await set_state(admin_id, "dbg_main", {})
+        sign = "\\+" if amount >= 0 else ""
+        await update.message.reply_text(
+            f"✅ Монеты изменены на *{sign}{amount}*\\. Баланс: *{new_coins}*\n\n{_user_dbg_text(target)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=debug_user_kb(uid),
+        )
+
+    elif action == "dbg_set_rating":
+        uid = data["target_uid"]
+        target = db.get_user(uid)
+        try:
+            if text.startswith("+") or text.startswith("-"):
+                new_rating = max(100, target["rating"] + int(text))
+            else:
+                new_rating = max(100, int(text))
+        except ValueError:
+            await update.message.reply_text("❌ Введи число, например: 1500 или +100 или -50")
+            return
+        db.update_user(uid, rating=new_rating)
+        target = db.get_user(uid)
+        await set_state(admin_id, "dbg_main", {})
+        await update.message.reply_text(
+            f"✅ Рейтинг установлен: *{new_rating}*\n\n{_user_dbg_text(target)}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=debug_user_kb(uid),
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Training mode (vs bot, no rating changes) ──────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_play_training(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    user = db.get_user(user_id)
+    if not user:
+        await q.edit_message_text("Сначала зарегистрируйся через /start")
+        return
+
+    await q.edit_message_text(
+        "🤖 *Режим тренировки*\n\n"
+        "6 раундов против бота\\. Рейтинг не меняется\\.\n\n"
+        "Раунды 1, 3, 5 — бот выбирает, ты угадываешь\\.\n"
+        "Раунды 2, 4, 6 — ты выбираешь, бот угадывает\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Начать", callback_data="training_start")],
+            [InlineKeyboardButton("← Назад",   callback_data="menu_play")],
+        ]),
+    )
+
+
+async def cb_training_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+
+    state = {
+        "round_num": 1,
+        "player_score": 0,
+        "bot_score": 0,
+        "rounds_data": [],
+        "is_player_guessing": True,  # odd rounds: player guesses
+    }
+    await set_state(user_id, "training_game", state)
+    await q.edit_message_text("🎮 Тренировка начинается\\!", parse_mode=ParseMode.MARKDOWN_V2)
+    await _training_next_round(ctx, user_id, state)
+
+
+async def _training_next_round(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    state: dict,
+) -> None:
+    round_num = state["round_num"]
+    is_player_guessing = state["is_player_guessing"]
+
+    if is_player_guessing:
+        # Bot picks a random transfer → player guesses
+        transfer = _bot_pick_transfer()
+        if not transfer:
+            await ctx.bot.send_message(user_id, "⚠️ Нет данных для тренировки\\. Дождись окончания загрузки трансферов\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await clear_state(user_id)
+            return
+
+        state["current_transfer_id"] = transfer["id"]
+        state["current_actual_fee"] = transfer["transfer_fee"]
+        state["hints_used"] = 0
+        state["used_hint_types"] = []
+        await set_state(user_id, "training_guessing", state)
+
+        kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in HINT_TYPES]
+        await ctx.bot.send_message(
+            user_id,
+            f"🤖 Раунд *{round_num}/{TOTAL_ROUNDS}* — Бот выбрал трансфер:\n\n"
+            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n\n"
+            f"💰 Назови сумму трансфера:\n_Например: 45M, 45000000, 500K_",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+    else:
+        # Player picks → show league selector
+        state_copy = dict(state)
+        await set_state(user_id, "training_picking_league", state_copy)
+        await ctx.bot.send_message(
+            user_id,
+            f"⚽ Раунд *{round_num}/{TOTAL_ROUNDS}* — Твой ход\\! Выбери лигу:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=training_leagues_kb(),
+        )
+
+
+def _bot_pick_transfer() -> dict | None:
+    """Pick a random transfer from the DB for the bot to use."""
+    import random as _random
+    leagues = db.get_leagues()
+    _random.shuffle(leagues)
+    for league in leagues:
+        clubs = db.get_clubs_by_league(league["league_id"])
+        if not clubs:
+            continue
+        club = _random.choice(clubs)
+        transfers = db.get_transfers_by_club(club["club_id"], limit=20)
+        if transfers:
+            return _random.choice(transfers)
+    return None
+
+
+def _bot_guess(actual_fee: int) -> int:
+    """Simulate bot guess — roughly within ±35% with occasional accuracy."""
+    import random as _random
+    roll = _random.random()
+    if roll < 0.08:    # 8% exact
+        return actual_fee
+    elif roll < 0.20:  # 12% within 5%
+        error = _random.uniform(-0.05, 0.05)
+    elif roll < 0.45:  # 25% within 15%
+        error = _random.uniform(-0.15, 0.15)
+    else:              # 55% within 35%
+        error = _random.uniform(-0.35, 0.35)
+    return max(100_000, round(actual_fee * (1 + error) / 100_000) * 100_000)
+
+
+def training_leagues_kb() -> InlineKeyboardMarkup:
+    leagues = db.get_leagues()
+    rows = [[InlineKeyboardButton(f"{lg['flag']} {lg['league_name']}", callback_data=f"tgl_{lg['league_id']}")] for lg in leagues]
+    rows.append([InlineKeyboardButton("❌ Завершить тренировку", callback_data="training_abort")])
+    return InlineKeyboardMarkup(rows)
+
+
+def training_clubs_kb(league_id: str) -> InlineKeyboardMarkup:
+    clubs = db.get_clubs_by_league(league_id)
+    rows = [[InlineKeyboardButton(c["club_name"], callback_data=f"tgc_{c['club_id']}")] for c in clubs[:12]]
+    rows.append([InlineKeyboardButton("← Назад", callback_data="training_pick_league")])
+    return InlineKeyboardMarkup(rows)
+
+
+def training_transfers_kb(transfers: list[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(f"{t['player_name']} ({t['season']})", callback_data=f"tgt_{t['id']}")] for t in transfers]
+    rows.append([InlineKeyboardButton("← Назад", callback_data="training_pick_league")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_training_pick_league(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    action, state = await get_state(user_id)
+    if action not in ("training_picking_league", "training_picking_club"):
+        return
+    league_id = q.data[4:]  # strip "tgl_"
+    state["league_id"] = league_id
+    await set_state(user_id, "training_picking_club", state)
+    await q.edit_message_reply_markup(reply_markup=training_clubs_kb(league_id))
+
+
+async def cb_training_pick_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    action, state = await get_state(user_id)
+    if action != "training_picking_club":
+        return
+    club_id = q.data[4:]  # strip "tgc_"
+    transfers = db.get_transfers_by_club(club_id)
+    if not transfers:
+        await q.answer("У этого клуба нет трансферов в базе\\.", show_alert=True)
+        return
+    state["club_id"] = club_id
+    await set_state(user_id, "training_picking_transfer", state)
+    await q.edit_message_reply_markup(reply_markup=training_transfers_kb(transfers))
+
+
+async def cb_training_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    action, state = await get_state(user_id)
+    if action != "training_picking_transfer":
+        return
+
+    transfer_id = int(q.data[4:])  # strip "tgt_"
+    transfer = db.get_transfer(transfer_id)
+    if not transfer:
+        return
+
+    actual_fee = transfer["transfer_fee"]
+    bot_guess = _bot_guess(actual_fee)
+    tier, points = calculate_points(bot_guess, actual_fee, 0)
+
+    state["bot_score"] += points
+    state["rounds_data"].append({
+        "round_num": state["round_num"],
+        "guesser": "bot",
+        "player_name": transfer["player_name"],
+        "actual_fee": actual_fee,
+        "guess": bot_guess,
+        "tier": tier,
+        "points": points,
+    })
+
+    tier_icon = {"exact": "🎯", "5pct": "🔥", "10pct": "👍", "20pct": "😅", "miss": "❌"}.get(tier, "•")
+    await q.edit_message_text(
+        f"🤖 Бот угадывал: *{_esc(transfer['player_name'])}*\n"
+        f"✅ Цена: *{_esc(format_fee(actual_fee))}*\n"
+        f"🤖 Ответ бота: *{_esc(format_fee(bot_guess))}*\n\n"
+        f"{tier_icon} {TIER_LABELS.get(tier, tier)} — бот получает *\\+{points}* очков",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    await _training_advance(ctx, user_id, state)
+
+
+async def cb_training_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    user_id = q.from_user.id
+    action, data = await get_state(user_id)
+    if action != "training_guessing":
+        await q.answer("Сейчас не твоя очередь угадывать\\.", show_alert=True)
+        return
+
+    hint_type = q.data[4:]  # strip "tgh_"
+    used = data.get("used_hint_types", [])
+    hints_used = data.get("hints_used", 0)
+
+    if hints_used >= MAX_HINTS:
+        await q.answer("Лимит подсказок исчерпан!", show_alert=True)
+        return
+    if hint_type in used:
+        await q.answer("Эта подсказка уже использована.", show_alert=True)
+        return
+
+    transfer = db.get_transfer(data["current_transfer_id"])
+    mapping = {
+        "position":    ("🎽 Позиция",       transfer.get("position")),
+        "age":         ("🎂 Возраст",        str(transfer["age"]) + " лет" if transfer.get("age") else None),
+        "nationality": ("🌍 Национальность", transfer.get("nationality")),
+        "from_club":   ("🏟 Откуда пришёл", transfer.get("from_club")),
+        "season":      ("📅 Сезон",          transfer.get("season")),
+    }
+    label, val = mapping.get(hint_type, ("?", None))
+    await q.answer(f"{label}: {val or 'неизвестно'}", show_alert=True)
+
+    used.append(hint_type)
+    data["used_hint_types"] = used
+    data["hints_used"] = hints_used + 1
+    await set_state(user_id, "training_guessing", data)
+
+    remaining = [h for h in HINT_TYPES if h not in used]
+    kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in remaining]
+    try:
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
+    except TelegramError:
+        pass
+
+
+async def _handle_training_guess(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, data: dict) -> None:
+    user_id = update.effective_user.id
+    guess = parse_fee_input(text)
+    if guess is None:
+        await update.message.reply_text(
+            "Не могу распознать сумму\\. Примеры: `45M`, `45000000`, `500K`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    actual_fee = data["current_actual_fee"]
+    hints_used = data.get("hints_used", 0)
+    transfer = db.get_transfer(data["current_transfer_id"])
+    player_name = transfer["player_name"] if transfer else "?"
+
+    tier, points = calculate_points(guess, actual_fee, hints_used)
+    data["player_score"] += points
+    data["rounds_data"].append({
+        "round_num": data["round_num"],
+        "guesser": "player",
+        "player_name": player_name,
+        "actual_fee": actual_fee,
+        "guess": guess,
+        "tier": tier,
+        "points": points,
+        "hints_used": hints_used,
+    })
+
+    effect = tier_effect(tier, points)
+    await update.message.reply_text(
+        f"{effect}\n\n"
+        f"👤 *{_esc(player_name)}*\n"
+        f"✅ Правильная цена: *{_esc(format_fee(actual_fee))}*\n"
+        f"🎯 Твой ответ: *{_esc(format_fee(guess))}*",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    await _training_advance(ctx, user_id, data)
+
+
+async def _training_advance(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, state: dict) -> None:
+    next_round = state["round_num"] + 1
+    if next_round > TOTAL_ROUNDS:
+        await _training_finish(ctx, user_id, state)
+        return
+
+    state["round_num"] = next_round
+    state["is_player_guessing"] = (next_round % 2 == 1)  # odd → player guesses
+    await set_state(user_id, "training_game", state)
+    await asyncio.sleep(1.0)
+    await _training_next_round(ctx, user_id, state)
+
+
+async def cb_training_abort(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await clear_state(q.from_user.id)
+    await q.edit_message_text("Тренировка завершена.", reply_markup=main_menu_kb())
+
+
+async def cb_training_back_league(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    action, state = await get_state(user_id)
+    await set_state(user_id, "training_picking_league", state)
+    await q.edit_message_reply_markup(reply_markup=training_leagues_kb())
+
+
+async def _training_finish(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, state: dict) -> None:
+    player_score = state["player_score"]
+    bot_score = state["bot_score"]
+    rounds_data = state["rounds_data"]
+
+    TIER_ICON = {"exact": "🎯", "5pct": "🔥", "10pct": "👍", "20pct": "😅", "miss": "❌"}
+
+    if player_score > bot_score:
+        header = "🏆 *П О Б Е Д А* 🏆\n⭐✨⭐✨⭐✨⭐✨⭐✨"
+        score_line = f"*{player_score}* \\: {bot_score}"
+    elif bot_score > player_score:
+        header = "💔 *П О Р А Ж Е Н И Е*\n〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️"
+        score_line = f"{player_score} \\: *{bot_score}*"
+    else:
+        header = "🤝 *Н И Ч Ь Я*\n〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️"
+        score_line = f"*{player_score}* \\: *{bot_score}*"
+
+    score_block = (
+        f"┌─────────────────────┐\n"
+        f"        Ты  vs  🤖 Бот\n"
+        f"          {score_line}\n"
+        f"└─────────────────────┘"
+    )
+
+    player_rounds = [r for r in rounds_data if r["guesser"] == "player"]
+    lines = []
+    for r in player_rounds:
+        icon = TIER_ICON.get(r["tier"], "•")
+        hints = r.get("hints_used", 0)
+        hint_str = f" \\(\\-{hints} подск\\.\\)" if hints else ""
+        lines.append(f"{icon} *{_esc(r['player_name'])}*{hint_str} — \\+{r['points']}")
+    lines.append(f"\n*Итого: {player_score} очков*")
+    rounds_block = "\n".join(lines)
+
+    text = (
+        f"{header}\n\n"
+        f"{score_block}\n\n"
+        f"*Твои угадывания:*\n{rounds_block}\n\n"
+        f"🔄 *Тренировка* — рейтинг не изменился"
+    )
+
+    await clear_state(user_id)
+    await ctx.bot.send_message(
+        user_id, text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔁 Ещё раз",  callback_data="training_start"),
+             InlineKeyboardButton("🏠 Меню",     callback_data="menu_back")],
+        ]),
+    )
+
+
 # ── Application setup ─────────────────────────────────────────────────────────
 
 def create_application() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands
-    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
-    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("help",   cmd_help))
+    app.add_handler(CommandHandler("debug",  cmd_debug))
 
     # Callback queries — specific patterns before general ones
     handlers = [
-        ("^menu_play$",          cb_menu_play),
-        ("^menu_profile$",       cb_menu_profile),
-        ("^menu_leaderboard$",   cb_menu_leaderboard),
-        ("^menu_help$",          cb_menu_help),
-        ("^menu_back$",          cb_menu_back),
-        ("^play_challenge$",     cb_play_challenge),
-        ("^play_random$",        cb_play_random),
-        ("^challenge_accept_",   cb_challenge_accept),
-        ("^challenge_decline_",  cb_challenge_decline),
-        ("^result_rematch$",     cb_result_rematch),
-        ("^result_menu$",        cb_menu_back),
-        ("^game_cancel$",        cb_game_cancel),
-        ("^game_pick_league$",   cb_pick_league_back),
-        ("^gl_",                 cb_pick_league),
-        ("^gcp_",                cb_clubs_page),
-        ("^gc_",                 cb_pick_club),
-        ("^gt_",                 cb_pick_transfer),
-        ("^gh_",                 cb_hint),
+        # Menu
+        ("^menu_play$",           cb_menu_play),
+        ("^menu_profile$",        cb_menu_profile),
+        ("^menu_leaderboard$",    cb_menu_leaderboard),
+        ("^menu_help$",           cb_menu_help),
+        ("^menu_back$",           cb_menu_back),
+        # Play
+        ("^play_challenge$",      cb_play_challenge),
+        ("^play_random$",         cb_play_random),
+        ("^play_training$",       cb_play_training),
+        # Challenges
+        ("^challenge_accept_",    cb_challenge_accept),
+        ("^challenge_decline_",   cb_challenge_decline),
+        # Results
+        ("^result_rematch$",      cb_result_rematch),
+        ("^result_menu$",         cb_menu_back),
+        # Game
+        ("^game_cancel$",         cb_game_cancel),
+        ("^game_pick_league$",    cb_pick_league_back),
+        ("^gl_",                  cb_pick_league),
+        ("^gcp_",                 cb_clubs_page),
+        ("^gc_",                  cb_pick_club),
+        ("^gt_",                  cb_pick_transfer),
+        ("^gh_",                  cb_hint),
+        # Training
+        ("^training_start$",      cb_training_start),
+        ("^training_abort$",      cb_training_abort),
+        ("^training_pick_league$",cb_training_back_league),
+        ("^tgl_",                 cb_training_pick_league),
+        ("^tgc_",                 cb_training_pick_club),
+        ("^tgt_",                 cb_training_pick_transfer),
+        ("^tgh_",                 cb_training_hint),
+        # Debug
+        ("^dbg_lookup$",          cb_dbg_lookup),
+        ("^dbg_back$",            cb_dbg_back),
+        ("^dbg_coins_",           cb_dbg_coins),
+        ("^dbg_rating_",          cb_dbg_rating),
+        ("^dbg_resetcal_",        cb_dbg_resetcal),
+        ("^dbg_clearstate_",      cb_dbg_clearstate),
     ]
     for pattern, handler in handlers:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
