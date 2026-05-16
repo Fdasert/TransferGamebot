@@ -28,7 +28,7 @@ def get_user(user_id: int) -> dict | None:
 
 
 def create_user(user_id: int, username: str | None, display_name: str) -> dict:
-    row = {"user_id": user_id, "username": username, "display_name": display_name}
+    row = {"user_id": user_id, "username": username, "display_name": display_name, "rating": 0}
     res = get_client().table("users").insert(row).execute()
     return res.data[0]
 

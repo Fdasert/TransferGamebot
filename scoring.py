@@ -25,7 +25,7 @@ def calculate_placement_rating(
     max_score = CALIBRATION_GAMES * 3 * 10  # 3 guessing rounds × 10 max pts × 10 games
     score_rate = min(total_guessing_score / max_score, 1.0)
     perf = 0.4 * win_rate + 0.6 * score_rate
-    return round(600 + perf * 800)
+    return round(300 + perf * 2200)
 
 
 def calculate_deviation(guess: int, actual: int) -> float:
@@ -118,9 +118,9 @@ def calculate_elo(
     new_a = round(rating_a + delta_a)
     new_b = round(rating_b + delta_b)
 
-    # Minimum rating floor = 100
-    new_a = max(100, new_a)
-    new_b = max(100, new_b)
+    # Minimum rating floor = 0
+    new_a = max(0, new_a)
+    new_b = max(0, new_b)
 
     return new_a, new_b, round(delta_a), round(delta_b)
 

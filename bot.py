@@ -391,7 +391,7 @@ def _players_list_kb(current_user_id: int, page: int = 0) -> InlineKeyboardMarku
 
     rows = []
     for p in chunk:
-        rating = p.get("rating", 1000)
+        rating = p.get("rating", 0)
         label = f"{p['display_name']}  •  {rating}⭐"
         rows.append([InlineKeyboardButton(label, callback_data=f"chp_{p['user_id']}")])
 
