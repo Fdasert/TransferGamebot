@@ -882,7 +882,6 @@ def _build_hint_lines(transfer: dict, used_hint_types: list[str]) -> list[str]:
 
 async def cb_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()  # acknowledge immediately so button doesn't spin
     user_id = q.from_user.id
     action, data = await get_state(user_id)
 
@@ -919,7 +918,6 @@ async def cb_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     label, val = mapping.get(hint_type, ("?", None))
     val_str = str(val) if val else "неизвестно"
 
-    # Single q.answer() call with the hint text as alert
     await q.answer(f"{label}: {val_str}", show_alert=True)
 
     # Update keyboard — remove used hint, keep remaining
@@ -1845,7 +1843,6 @@ async def cb_training_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TY
 
 async def cb_training_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()  # acknowledge immediately so button doesn't spin
     user_id = q.from_user.id
     action, data = await get_state(user_id)
     if action != "training_guessing":
