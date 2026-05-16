@@ -379,6 +379,31 @@ async def cb_menu_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Challenge flow ────────────────────────────────────────────────────────────
 
+def _players_list_kb(current_user_id: int, page: int = 0) -> InlineKeyboardMarkup:
+    """Paginated list of all registered players except current user."""
+    players = db.get_all_users(exclude_user_id=current_user_id)
+    page_size = 8
+    start = page * page_size
+    chunk = players[start: start + page_size]
+
+    rows = []
+    for p in chunk:
+        rating = p.get("rating", 1000)
+        label = f"{p['display_name']}  •  {rating}⭐"
+        rows.append([InlineKeyboardButton(label, callback_data=f"chp_{p['user_id']}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"chpp_{current_user_id}_{page - 1}"))
+    if start + page_size < len(players):
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"chpp_{current_user_id}_{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("← Отмена", callback_data="menu_back")])
+    return InlineKeyboardMarkup(rows)
+
+
 async def cb_play_challenge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -386,12 +411,97 @@ async def cb_play_challenge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     if not user:
         await q.edit_message_text("Сначала зарегистрируйся через /start")
         return
-    await set_state(q.from_user.id, "entering_challenge_username", {})
+
+    players = db.get_all_users(exclude_user_id=q.from_user.id)
+    if not players:
+        await q.edit_message_text(
+            "Пока нет других зарегистрированных игроков\\. Пригласи друзей\\!",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="menu_back")]]),
+        )
+        return
+
     await q.edit_message_text(
-        "Введи *@username* соперника \\(без @\\):",
+        "⚔️ *Выбери соперника:*",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Отмена", callback_data="menu_back")]]),
+        reply_markup=_players_list_kb(q.from_user.id),
     )
+
+
+async def cb_players_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pagination for the players list: chpp_{current_user_id}_{page}"""
+    q = update.callback_query
+    await q.answer()
+    parts = q.data[5:].rsplit("_", 1)
+    current_user_id, page = int(parts[0]), int(parts[1])
+    await q.edit_message_reply_markup(reply_markup=_players_list_kb(current_user_id, page))
+
+
+async def cb_select_opponent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """User picked an opponent from the list: chp_{opponent_id}"""
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    opponent_id = int(q.data[4:])  # strip "chp_"
+
+    user = db.get_user(user_id)
+    target = db.get_user(opponent_id)
+    if not user or not target:
+        await q.edit_message_text("Игрок не найден.")
+        return
+
+    challenge = db.create_challenge(user_id, target["user_id"])
+    challenge_id = challenge["id"]
+
+    await set_state(user_id, "waiting_for_opponent", {
+        "challenge_id": challenge_id,
+        "challenged_id": target["user_id"],
+    })
+    await set_state(target["user_id"], "challenge_received", {
+        "challenge_id": challenge_id,
+        "challenger_id": user_id,
+    })
+
+    # Show target's stats to challenger
+    gp = target.get("games_played", 0)
+    wins = target.get("wins", 0)
+    losses = target.get("losses", 0)
+    wr = f"{wins/gp*100:.0f}%" if gp else "—"
+    await q.edit_message_text(
+        f"📊 *{_esc(target['display_name'])}*\n"
+        f"🏅 Рейтинг: {rating_display(target)}\n"
+        f"🎮 Игр: {gp}  |  ✅ Побед: {wins}  |  ❌ Поражений: {losses}\n"
+        f"📊 Винрейт: {wr}\n\n"
+        f"Вызов отправлен\\. Ждём ответа\\.\\.\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить вызов", callback_data="menu_back")]]),
+    )
+
+    # Notify challenged player
+    gp_c = user.get("games_played", 0)
+    wins_c = user.get("wins", 0)
+    losses_c = user.get("losses", 0)
+    wr_c = f"{wins_c/gp_c*100:.0f}%" if gp_c else "—"
+    try:
+        await ctx.bot.send_message(
+            target["user_id"],
+            f"⚔️ *{_esc(user['display_name'])}* вызывает тебя\\!\n\n"
+            f"🏅 Рейтинг: {rating_display(user)}\n"
+            f"🎮 Игр: {gp_c}  |  ✅ Побед: {wins_c}  |  ❌ Поражений: {losses_c}\n"
+            f"📊 Винрейт: {wr_c}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Принять", callback_data=f"challenge_accept_{challenge_id}_{user_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"challenge_decline_{challenge_id}_{user_id}"),
+            ]]),
+        )
+    except TelegramError as e:
+        logger.warning("Could not DM challenged player %s: %s", target["user_id"], e)
+        await q.edit_message_text(
+            "⚠️ Не удалось отправить уведомление сопернику\\. Возможно, они не запустили бота\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        await clear_state(user_id)
 
 
 async def cb_play_random(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -830,8 +940,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     if action == "registering":
         await _handle_registration(update, text)
-    elif action == "entering_challenge_username":
-        await _handle_challenge_username(update, ctx, text)
     elif action == "guessing":
         await _handle_guess(update, ctx, text, data)
     elif action == "training_guessing":
@@ -858,81 +966,6 @@ async def _handle_registration(update: Update, text: str) -> None:
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=main_menu_kb(),
     )
-
-
-async def _handle_challenge_username(
-    update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str
-) -> None:
-    user_id = update.effective_user.id
-    target = db.get_user_by_username(text.lstrip("@"))
-    if not target:
-        await update.message.reply_text(
-            f"Игрок *{_esc(text)}* не найден\\. Проверь username и попробуй снова:",
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return
-    if target["user_id"] == user_id:
-        await update.message.reply_text("Нельзя вызвать самого себя 😄")
-        return
-
-    challenger = db.get_user(user_id)
-    challenge = db.create_challenge(user_id, target["user_id"])
-    challenge_id = challenge["id"]
-
-    await set_state(user_id, "waiting_for_opponent", {
-        "challenge_id": challenge_id,
-        "challenged_id": target["user_id"],
-    })
-    await set_state(target["user_id"], "challenge_received", {
-        "challenge_id": challenge_id,
-        "challenger_id": user_id,
-    })
-
-    # Show target's stats to challenger
-    gp = target.get("games_played", 0)
-    wins = target.get("wins", 0)
-    losses = target.get("losses", 0)
-    wr = f"{wins/gp*100:.0f}%" if gp else "—"
-    stats_text = (
-        f"📊 *{_esc(target['display_name'])}*\n"
-        f"🏅 Рейтинг: {rating_display(target)}\n"
-        f"🎮 Игр: {gp}  |  ✅ Побед: {wins}  |  ❌ Поражений: {losses}\n"
-        f"📊 Винрейт: {wr}\n\n"
-        f"Вызов отправлен\\. Ждём ответа\\.\\.\\."
-    )
-    await update.message.reply_text(
-        stats_text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить вызов", callback_data="menu_back")]]),
-    )
-
-    # Notify challenged player with challenger's stats
-    gp_c = challenger.get("games_played", 0)
-    wins_c = challenger.get("wins", 0)
-    losses_c = challenger.get("losses", 0)
-    wr_c = f"{wins_c/gp_c*100:.0f}%" if gp_c else "—"
-    challenge_text = (
-        f"⚔️ *{_esc(challenger['display_name'])}* вызывает тебя\\!\n\n"
-        f"🏅 Рейтинг: {rating_display(challenger)}\n"
-        f"🎮 Игр: {gp_c}  |  ✅ Побед: {wins_c}  |  ❌ Поражений: {losses_c}\n"
-        f"📊 Винрейт: {wr_c}"
-    )
-    try:
-        await ctx.bot.send_message(
-            target["user_id"],
-            challenge_text,
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Принять", callback_data=f"challenge_accept_{challenge_id}_{user_id}"),
-                    InlineKeyboardButton("❌ Отклонить", callback_data=f"challenge_decline_{challenge_id}_{user_id}"),
-                ]
-            ]),
-        )
-    except TelegramError as e:
-        logger.warning("Could not DM challenged player %s: %s", target["user_id"], e)
-        await update.message.reply_text("⚠️ Не удалось отправить уведомление сопернику. Возможно, они не запустили бота.")
-        await clear_state(user_id)
 
 
 # ── Guess handler ─────────────────────────────────────────────────────────────
@@ -1897,6 +1930,8 @@ def create_application() -> Application:
         ("^menu_back$",           cb_menu_back),
         # Play
         ("^play_challenge$",      cb_play_challenge),
+        ("^chpp_",                cb_players_page),
+        ("^chp_",                 cb_select_opponent),
         ("^play_random$",         cb_play_random),
         ("^play_training$",       cb_play_training),
         # Challenges

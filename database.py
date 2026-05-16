@@ -49,6 +49,21 @@ def get_user_by_username(username: str) -> dict | None:
     return res.data[0] if res.data else None
 
 
+def get_all_users(exclude_user_id: int | None = None) -> list[dict]:
+    """All registered users sorted by rating, optionally excluding one user."""
+    res = (
+        get_client()
+        .table("users")
+        .select("user_id, display_name, username, rating, games_played, is_calibrated")
+        .order("rating", desc=True)
+        .execute()
+    )
+    users = res.data or []
+    if exclude_user_id is not None:
+        users = [u for u in users if u["user_id"] != exclude_user_id]
+    return users
+
+
 def get_leaderboard(limit: int = 10) -> list[dict]:
     res = (
         get_client()
