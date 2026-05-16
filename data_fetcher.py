@@ -24,6 +24,9 @@ BASE = TRANSFERMARKT_API_URL.rstrip("/")
 
 LEAGUE_IDS = ["GB1", "ES1", "L1", "IT1", "FR1", "RU1"]
 
+# Scan these seasons to collect clubs (union across seasons → all promoted/relegated teams)
+CLUB_SEASONS = ["2024", "2023", "2022", "2021", "2020", "2018", "2016", "2014", "2012", "2010", "2008", "2005", "2002", "2000"]
+
 # Scan these seasons to collect player IDs (player transfers API covers full history)
 SQUAD_SEASONS = ["2024", "2022", "2020", "2018", "2015", "2010", "2005", "2000"]
 
@@ -56,20 +59,31 @@ def _get(path: str, params: dict | None = None, retries: int = 3) -> dict | None
 
 
 def fetch_clubs_for_league(league_id: str) -> list[dict]:
-    data = _get(f"/competitions/{league_id}/clubs")
-    if not data:
+    """
+    Scan multiple seasons and union all clubs — captures promoted/relegated teams.
+    Without season_id the API defaults to the current season only.
+    """
+    seen_ids: set[str] = set()
+    result: list[dict] = []
+
+    for season in CLUB_SEASONS:
+        data = _get(f"/competitions/{league_id}/clubs", params={"season_id": season})
+        if not data:
+            continue
+        for club in data.get("clubs", []):
+            club_id = str(club.get("id", "")).strip()
+            club_name = club.get("name", "").strip()
+            if club_id and club_name and club_id not in seen_ids:
+                seen_ids.add(club_id)
+                db.upsert_club(club_id, club_name, league_id)
+                result.append({"club_id": club_id, "club_name": club_name})
+        time.sleep(0.2)
+
+    if not result:
         logger.error("Failed to fetch clubs for league %s", league_id)
-        return []
-
-    result = []
-    for club in data.get("clubs", []):
-        club_id = str(club.get("id", "")).strip()
-        club_name = club.get("name", "").strip()
-        if club_id and club_name:
-            db.upsert_club(club_id, club_name, league_id)
-            result.append({"club_id": club_id, "club_name": club_name})
-
-    logger.info("  %d clubs fetched for %s", len(result), league_id)
+    else:
+        logger.info("  %d unique clubs fetched for %s (across %d seasons)",
+                    len(result), league_id, len(CLUB_SEASONS))
     return result
 
 
