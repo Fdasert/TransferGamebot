@@ -1,0 +1,46 @@
+import os
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8946919803:AAG-4VhO8o4oHN_S7a33Soj8U5efGs83Blc")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://ghhscwncdrmrpobdyhqk.supabase.co")
+SUPABASE_KEY = os.getenv(
+    "SUPABASE_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdoaHNjd25jZHJtcnBvYmR5aHFrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODkzMjk0MCwiZXhwIjoyMDk0NTA4OTQwfQ.PUW0pibcZ9V2AwpqnHriKU9lkI8aavgO1VfkYRDpWJg",
+)
+
+SUPERADMIN_IDS: list[int] = []
+
+TRANSFERMARKT_API_URL = os.getenv("TRANSFERMARKT_API_URL", "http://localhost:8000")
+
+# ELO
+ELO_K_CALIBRATION = 32
+ELO_K_RATED = 20
+CALIBRATION_GAMES = 10
+
+# Game rules
+TOTAL_ROUNDS = 6  # 3 picks each player
+MAX_HINTS = 2
+HINT_TYPES = ["position", "age", "nationality", "from_club", "season"]
+HINT_LABELS = {
+    "position": "Позиция",
+    "age": "Возраст",
+    "nationality": "Национальность",
+    "from_club": "Откуда пришёл",
+    "season": "Сезон",
+}
+
+# Accuracy tiers: (name, max_deviation_pct, base_points)
+ACCURACY_TIERS = [
+    ("exact", 0.0,  10),
+    ("5pct",  5.0,   8),
+    ("10pct", 10.0,  6),
+    ("20pct", 20.0,  4),
+]
+# Outside 20% → 0 points
+
+TIER_LABELS = {
+    "exact": "🎯 ТОЧНОЕ ПОПАДАНИЕ!",
+    "5pct":  "🔥 Почти идеал!",
+    "10pct": "👍 Неплохо!",
+    "20pct": "😅 Близко...",
+    "miss":  "❌ Мимо",
+}
