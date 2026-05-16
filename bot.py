@@ -469,9 +469,9 @@ async def cb_select_opponent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     wr = f"{wins/gp*100:.0f}%" if gp else "—"
     await q.edit_message_text(
         f"📊 *{_esc(target['display_name'])}*\n"
-        f"🏅 Рейтинг: {rating_display(target)}\n"
-        f"🎮 Игр: {gp}  |  ✅ Побед: {wins}  |  ❌ Поражений: {losses}\n"
-        f"📊 Винрейт: {wr}\n\n"
+        f"🏅 Рейтинг: {_esc(rating_display(target))}\n"
+        f"🎮 Игр: {gp} \\| ✅ Побед: {wins} \\| ❌ Поражений: {losses}\n"
+        f"📊 Винрейт: {_esc(wr)}\n\n"
         f"Вызов отправлен\\. Ждём ответа\\.\\.\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить вызов", callback_data="menu_back")]]),
@@ -486,9 +486,9 @@ async def cb_select_opponent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         await ctx.bot.send_message(
             target["user_id"],
             f"⚔️ *{_esc(user['display_name'])}* вызывает тебя\\!\n\n"
-            f"🏅 Рейтинг: {rating_display(user)}\n"
-            f"🎮 Игр: {gp_c}  |  ✅ Побед: {wins_c}  |  ❌ Поражений: {losses_c}\n"
-            f"📊 Винрейт: {wr_c}",
+            f"🏅 Рейтинг: {_esc(rating_display(user))}\n"
+            f"🎮 Игр: {gp_c} \\| ✅ Побед: {wins_c} \\| ❌ Поражений: {losses_c}\n"
+            f"📊 Винрейт: {_esc(wr_c)}",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Принять", callback_data=f"challenge_accept_{challenge_id}_{user_id}"),
