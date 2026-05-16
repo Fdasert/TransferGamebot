@@ -68,7 +68,7 @@ def get_leaderboard(limit: int = 10) -> list[dict]:
     res = (
         get_client()
         .table("users")
-        .select("user_id, display_name, username, rating, games_played, wins, losses, is_calibrated")
+        .select("user_id, display_name, username, rating, games_played, wins, losses, is_calibrated, calibration_games")
         .order("rating", desc=True)
         .limit(limit)
         .execute()
