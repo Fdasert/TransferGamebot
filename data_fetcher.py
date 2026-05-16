@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 BASE = TRANSFERMARKT_API_URL.rstrip("/")
 
-LEAGUE_IDS = ["GB1", "ES1", "L1", "IT1", "FR1"]
+LEAGUE_IDS = ["GB1", "ES1", "L1", "IT1", "FR1", "RU1"]
 
 # Scan these seasons to collect player IDs (player transfers API covers full history)
 SQUAD_SEASONS = ["2024", "2022", "2020", "2018", "2015", "2010", "2005", "2000"]
