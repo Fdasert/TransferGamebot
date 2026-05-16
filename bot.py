@@ -1027,12 +1027,16 @@ async def _finish_game(
     p1 = db.get_user(p1_id)
     p2 = db.get_user(p2_id)
 
-    # ELO
-    new_r1, new_r2 = calculate_elo(
+    # ELO — pass rounds for skill bonuses
+    rounds_p1 = [r for r in rounds if r["guesser_id"] == p1_id]
+    rounds_p2 = [r for r in rounds if r["guesser_id"] == p2_id]
+
+    new_r1, new_r2, delta1, delta2 = calculate_elo(
         p1["rating"], p2["rating"],
         p1_score, p2_score,
         p1["is_calibrated"], p2["is_calibrated"],
         p1["calibration_games"], p2["calibration_games"],
+        rounds_p1, rounds_p2,
     )
     a_won = True if winner_id == p1_id else (False if winner_id == p2_id else None)
     db.apply_elo_result(p1, p2, new_r1, new_r2, a_won)
@@ -1106,7 +1110,7 @@ async def _finish_game(
     db.add_coins(p2_id, p2_coins)
 
     async def _send_result(pid: int, my_score: int, opp_score: int,
-                           opponent: dict, new_r: int, old_r: int,
+                           opponent: dict, new_r: int, old_r: int, delta: int,
                            coins_earned: int, coin_breakdown: list[str]) -> None:
         me = p1 if pid == p1_id else p2
         diff = new_r - old_r
@@ -1156,9 +1160,27 @@ async def _finish_game(
             cal_left = max(0, CALIBRATION_GAMES - cal_done)
             rating_block = f"🔄 *Калибровка* — ещё {cal_left} игр до рейтинга"
         else:
-            arrow = "📈" if diff >= 0 else "📉"
+            arrow = "📈" if delta >= 0 else "📉"
+            delta_str = f"\\+{delta}" if delta >= 0 else str(delta)
+
+            # Breakdown of delta
+            my_rounds = rounds_p1 if pid == p1_id else rounds_p2
+            base_delta = delta
+            exact_cnt = sum(1 for r in my_rounds if r.get("accuracy_tier") == "exact" and r.get("completed"))
+            close_cnt  = sum(1 for r in my_rounds if r.get("accuracy_tier") == "5pct"  and r.get("completed"))
+            hints_cnt  = sum((r.get("hints_used") or 0) for r in my_rounds if r.get("completed"))
+
+            detail_parts = []
+            if exact_cnt:
+                detail_parts.append(f"🎯×{exact_cnt} \\+{exact_cnt * 3}")
+            if close_cnt:
+                detail_parts.append(f"🔥×{close_cnt} \\+{close_cnt}")
+            if hints_cnt:
+                detail_parts.append(f"💡×{hints_cnt} \\-{hints_cnt}")
+            detail = f" _\\({', '.join(detail_parts)}\\)_" if detail_parts else ""
+
             rating_block = (
-                f"{arrow} *Рейтинг:* {old_r} → *{new_r}* \\({diff_str}\\)"
+                f"{arrow} *Рейтинг:* {old_r} → *{new_r}* \\({delta_str}\\){detail}"
             )
 
         # ── Coins ──
@@ -1191,8 +1213,8 @@ async def _finish_game(
     old_r1 = p1["rating"]
     old_r2 = p2["rating"]
 
-    await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, p1_coins, p1_coin_breakdown)
-    await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, p2_coins, p2_coin_breakdown)
+    await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, delta1, p1_coins, p1_coin_breakdown)
+    await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, delta2, p2_coins, p2_coin_breakdown)
 
 
 # ── Rematch ───────────────────────────────────────────────────────────────────

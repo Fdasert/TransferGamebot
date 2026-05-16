@@ -12,9 +12,14 @@ SUPERADMIN_IDS: list[int] = []
 TRANSFERMARKT_API_URL = os.getenv("TRANSFERMARKT_API_URL", "http://localhost:8000")
 
 # ELO
-ELO_K_CALIBRATION = 32
-ELO_K_RATED = 20
+ELO_K_CALIBRATION = 40   # more volatile during calibration
+ELO_K_RATED       = 24   # rated games
 CALIBRATION_GAMES = 10
+
+# ELO skill bonuses (applied on top of performance score)
+ELO_EXACT_BONUS   = 3    # per exact guess
+ELO_CLOSE_BONUS   = 1    # per ±5% guess
+ELO_HINT_PENALTY  = 1    # per hint used
 
 # Game rules
 TOTAL_ROUNDS = 6  # 3 picks each player

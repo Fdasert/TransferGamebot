@@ -37,28 +37,66 @@ def calculate_elo(
     is_calibrated_b: bool,
     games_played_a: int,
     games_played_b: int,
-) -> tuple[int, int]:
+    rounds_a: list[dict] | None = None,
+    rounds_b: list[dict] | None = None,
+) -> tuple[int, int, int, int]:
     """
-    Calculate new ELO ratings.
-    Returns (new_rating_a, new_rating_b).
-    During calibration (first CALIBRATION_GAMES games) K=32, else K=20.
+    Performance-based ELO with skill bonuses.
+
+    Performance score = share of total points scored (continuous, not binary).
+    Bonuses: +ELO_EXACT_BONUS per exact guess, +ELO_CLOSE_BONUS per ±5% guess.
+    Penalty: -ELO_HINT_PENALTY per hint used.
+
+    Returns (new_rating_a, new_rating_b, delta_a, delta_b).
     """
+    from config import ELO_EXACT_BONUS, ELO_CLOSE_BONUS, ELO_HINT_PENALTY
+
     k_a = ELO_K_CALIBRATION if not is_calibrated_a else ELO_K_RATED
     k_b = ELO_K_CALIBRATION if not is_calibrated_b else ELO_K_RATED
 
+    # Expected scores from ELO formula
     expected_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
     expected_b = 1 - expected_a
 
-    if score_a > score_b:
-        actual_a, actual_b = 1.0, 0.0
-    elif score_b > score_a:
-        actual_a, actual_b = 0.0, 1.0
+    # Performance score: share of total points (continuous 0→1)
+    total = score_a + score_b
+    if total == 0:
+        perf_a = perf_b = 0.5
     else:
-        actual_a, actual_b = 0.5, 0.5
+        perf_a = score_a / total
+        perf_b = score_b / total
 
-    new_a = round(rating_a + k_a * (actual_a - expected_a))
-    new_b = round(rating_b + k_b * (actual_b - expected_b))
-    return new_a, new_b
+    # Base ELO delta from performance
+    delta_a = k_a * (perf_a - expected_a)
+    delta_b = k_b * (perf_b - expected_b)
+
+    # Skill bonuses from round results
+    def _skill_bonus(rounds: list[dict] | None) -> float:
+        if not rounds:
+            return 0.0
+        bonus = 0.0
+        for r in rounds:
+            if not r.get("completed"):
+                continue
+            tier = r.get("accuracy_tier", "miss")
+            if tier == "exact":
+                bonus += ELO_EXACT_BONUS
+            elif tier == "5pct":
+                bonus += ELO_CLOSE_BONUS
+            bonus -= (r.get("hints_used") or 0) * ELO_HINT_PENALTY
+        return bonus
+
+    delta_a += _skill_bonus(rounds_a)
+    delta_b += _skill_bonus(rounds_b)
+
+    new_a = round(rating_a + delta_a)
+    new_b = round(rating_b + delta_b)
+
+    # Minimum rating floor = 100
+    new_a = max(100, new_a)
+    new_b = max(100, new_b)
+
+    return new_a, new_b, round(delta_a), round(delta_b)
 
 
 def format_fee(amount: int | None) -> str:
