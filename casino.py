@@ -839,6 +839,31 @@ async def cb_casino_bonus_spin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def cb_casino_bj(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mode selection: Solo vs PvP."""
+    q     = update.callback_query
+    await q.answer()
+    uid   = q.from_user.id
+    coins = db.get_coins(uid)
+
+    await q.edit_message_text(
+        "🃏 *БЛЭКДЖЕК*\n\n"
+        f"💰 Баланс: *{_fmt(coins)}* монет\n\n"
+        "Выбери режим:\n\n"
+        "🤖 *Соло* — против дилера\n"
+        "  Блэкджек → ×2.5  |  Победа → ×2  |  Дабл-даун\n\n"
+        "🤝 *ПвП* — против другого игрока\n"
+        "  Победа → ×2  |  Ничья → ставка назад",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤖 Соло (vs дилер)", callback_data="casino_bj_solo")],
+            [InlineKeyboardButton("🤝 ПвП Блэкджек",   callback_data="casino_bj_pvp")],
+            [InlineKeyboardButton("◀ Назад",             callback_data="casino_menu")],
+        ]),
+    )
+
+
+async def cb_casino_bj_solo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Solo blackjack — bet selection."""
     q     = update.callback_query
     await q.answer()
     uid   = q.from_user.id
@@ -855,10 +880,10 @@ async def cb_casino_bj(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 callback_data=f"casino_bjbet_{amt}" if can else "casino_no_coins",
             ))
         rows.append(row)
-    rows.append([InlineKeyboardButton("◀ Назад", callback_data="casino_menu")])
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data="casino_bj")])
 
     await q.edit_message_text(
-        "🃏 *БЛЭКДЖЕК*\n\n"
+        "🃏 *БЛЭКДЖЕК — Соло*\n\n"
         "Набери 21 или ближе к нему, чем дилер.\n"
         "• Блэкджек (туз + 10) → ×2.5\n"
         "• Победа → ×2\n"
@@ -1058,6 +1083,461 @@ async def cb_casino_bj_double(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     state.update({"bet": new_bet, "player": player, "deck": deck})
     db.set_pending_action(uid, "bj_solo", state)
     await _bj_finish(q, uid, player, dealer, new_bet)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Blackjack PvP handlers
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _bj_pvp_board(my_hand: list, opp_name: str, bet: int) -> str:
+    mv = _bj_hand_val(my_hand)
+    return (
+        f"👤 *Твои карты:* `{_bj_hand_str(my_hand)}`   _{mv}_\n"
+        f"🤝 *Соперник ({opp_name}):* карты скрыты\n\n"
+        f"Ставка: *{_fmt(bet)} 💰*"
+    )
+
+
+def _bj_pvp_get_state(uid: int) -> tuple[str | None, dict | None, int | None]:
+    """Returns (action, data, opponent_id) for a PvP BJ player, or (None, None, None)."""
+    pa = db.get_pending_action(uid)
+    if not pa:
+        return None, None, None
+    action = pa.get("action")
+    if action == "bj_pvp_host":
+        return action, pa["data"], pa["data"].get("guest_id")
+    if action == "bj_pvp_guest":
+        return action, pa["data"], pa["data"].get("host_id")
+    return None, None, None
+
+
+async def _bj_pvp_check_finish(ctx: ContextTypes.DEFAULT_TYPE, uid: int) -> None:
+    """If both players are done, resolve the game."""
+    action, data, opp_id = _bj_pvp_get_state(uid)
+    if not action or not opp_id:
+        return
+
+    is_host  = action == "bj_pvp_host"
+    host_id  = uid    if is_host else opp_id
+    guest_id = opp_id if is_host else uid
+
+    host_pa  = db.get_pending_action(host_id)
+    guest_pa = db.get_pending_action(guest_id)
+    if not host_pa or not guest_pa:
+        return  # already resolved
+
+    if host_pa["data"].get("done") and guest_pa["data"].get("done"):
+        await _bj_pvp_finish(ctx, host_id, host_pa["data"], guest_id, guest_pa["data"])
+
+
+async def _bj_pvp_finish(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    host_id: int, host_data: dict,
+    guest_id: int, guest_data: dict,
+) -> None:
+    """Compare hands, distribute coins, notify both players."""
+    bet        = host_data["bet"]
+    host_hand  = host_data["hand"]
+    guest_hand = guest_data["hand"]
+
+    hv = _bj_hand_val(host_hand)
+    gv = _bj_hand_val(guest_hand)
+    host_bust  = hv > 21
+    guest_bust = gv > 21
+
+    if host_bust and guest_bust:
+        host_payout = 0;       guest_payout = 0
+        result_h = "💥 Оба перебрали — ставки потеряны"
+        result_g = "💥 Оба перебрали — ставки потеряны"
+    elif host_bust:
+        host_payout = 0;       guest_payout = bet * 2
+        result_h = f"💥 Перебор ({hv}) — проигрыш"
+        result_g = f"🏆 Победа! Соперник перебрал ({hv})"
+    elif guest_bust:
+        host_payout = bet * 2; guest_payout = 0
+        result_h = f"🏆 Победа! Соперник перебрал ({gv})"
+        result_g = f"💥 Перебор ({gv}) — проигрыш"
+    elif hv > gv:
+        host_payout = bet * 2; guest_payout = 0
+        result_h = f"🏆 Победа! {hv} против {gv}"
+        result_g = f"😞 Проигрыш. {gv} против {hv}"
+    elif gv > hv:
+        host_payout = 0;       guest_payout = bet * 2
+        result_h = f"😞 Проигрыш. {hv} против {gv}"
+        result_g = f"🏆 Победа! {gv} против {hv}"
+    else:
+        host_payout = bet;     guest_payout = bet
+        result_h = f"🤝 Ничья! {hv} = {gv}"
+        result_g = f"🤝 Ничья! {gv} = {hv}"
+
+    host_bal  = db.add_coins(host_id,  host_payout)
+    guest_bal = db.add_coins(guest_id, guest_payout)
+    db.clear_pending_action(host_id)
+    db.clear_pending_action(guest_id)
+
+    host_user  = db.get_user(host_id)
+    guest_user = db.get_user(guest_id)
+    host_name  = host_user.get("display_name", "???") if host_user else "???"
+    guest_name = guest_user.get("display_name", "???") if guest_user else "???"
+
+    replay_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🃏 Играть снова", callback_data="casino_bj"),
+        InlineKeyboardButton("◀ Казино",        callback_data="casino_menu"),
+    ]])
+
+    for uid, my_hand, my_val, opp_hand, opp_val, opp_name, payout, result, bal in [
+        (host_id,  host_hand,  hv, guest_hand, gv, guest_name, host_payout,  result_h, host_bal),
+        (guest_id, guest_hand, gv, host_hand,  hv, host_name,  guest_payout, result_g, guest_bal),
+    ]:
+        net     = payout - bet
+        net_str = f"+{_fmt(net)}" if net >= 0 else _fmt(net)
+        try:
+            await ctx.bot.send_message(
+                uid,
+                f"🃏 *БЛЭКДЖЕК ПвП — Финал*\n\n"
+                f"👤 *Твои карты:* `{_bj_hand_str(my_hand)}`   _{my_val}_\n"
+                f"🤝 *{opp_name}:* `{_bj_hand_str(opp_hand)}`   _{opp_val}_\n\n"
+                f"{result}\n"
+                f"Ставка: *{_fmt(bet)} 💰*  |  Изменение: *{net_str} 💰*\n\n"
+                f"💼 Баланс: *{_fmt(bal)} 💰*",
+                parse_mode="Markdown",
+                reply_markup=replay_kb,
+            )
+        except Exception:
+            pass
+
+
+async def cb_casino_bj_pvp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """PvP lobby browser."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    lobbies = db.get_pvp_bj_lobbies(exclude_uid=uid)
+    coins   = db.get_coins(uid)
+
+    rows = []
+    for lobby in lobbies[:5]:
+        host_uid  = lobby["user_id"]
+        bet       = lobby["data"]["bet"]
+        host_user = db.get_user(host_uid)
+        host_name = host_user.get("display_name", "???") if host_user else "???"
+        can_join  = coins >= bet
+        rows.append([InlineKeyboardButton(
+            f"{'⚔️' if can_join else '🚫'} {host_name}  —  {_fmt(bet)} 💰",
+            callback_data=f"casino_bjpvp_join_{host_uid}" if can_join else "casino_no_coins",
+        )])
+
+    lobby_hdr = f"Открытых лобби: *{len(lobbies)}*" if lobbies else "_Нет открытых лобби_"
+
+    rows.append([InlineKeyboardButton("➕ Создать лобби", callback_data="casino_bjpvp_create")])
+    rows.append([InlineKeyboardButton("◀ Назад",          callback_data="casino_bj")])
+
+    await q.edit_message_text(
+        f"🃏 *БЛЭКДЖЕК ПвП*\n\n"
+        f"💰 Баланс: *{_fmt(coins)}* монет\n\n"
+        f"{lobby_hdr}\n\n"
+        "Присоединись к лобби или создай своё:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_casino_bjpvp_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bet selection for creating a PvP lobby."""
+    q     = update.callback_query
+    await q.answer()
+    uid   = q.from_user.id
+    coins = db.get_coins(uid)
+
+    rows = []
+    for i in range(0, len(_BJ_BETS), 2):
+        pair = _BJ_BETS[i:i + 2]
+        row  = []
+        for amt in pair:
+            can = coins >= amt
+            row.append(InlineKeyboardButton(
+                f"{'🪙' if can else '🚫'} {_fmt(amt)}",
+                callback_data=f"casino_bjpvp_bet_{amt}" if can else "casino_no_coins",
+            ))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data="casino_bj_pvp")])
+
+    await q.edit_message_text(
+        "🃏 *СОЗДАТЬ ПвП ЛОББИ*\n\n"
+        "Выбери ставку — соперник поставит столько же.\n"
+        "• Победа → ×2 ставки\n"
+        "• Ничья → ставка назад\n"
+        "• Оба перебрали → обе ставки сгорают\n\n"
+        f"💰 Баланс: *{_fmt(coins)}* монет\n\nВыбери ставку:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_casino_bjpvp_bet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Create PvP lobby: spend coins, save waiting state."""
+    q   = update.callback_query
+    uid = q.from_user.id
+    try:
+        bet = int(q.data[len("casino_bjpvp_bet_"):])
+    except ValueError:
+        await q.answer("Ошибка ставки.", show_alert=True); return
+
+    pa = db.get_pending_action(uid)
+    if pa and pa.get("action") in ("in_game", "my_turn", "solo_game", "bj_solo", "bj_pvp_host", "bj_pvp_guest"):
+        await q.answer("Ты уже в игре!", show_alert=True); return
+
+    ok, _ = db.spend_coins(uid, bet)
+    if not ok:
+        await q.answer("Недостаточно монет!", show_alert=True); return
+    await q.answer()
+
+    db.set_pending_action(uid, "bj_pvp_host", {
+        "bet":      bet,
+        "status":   "waiting",
+        "hand":     None,
+        "deck":     None,
+        "done":     False,
+        "guest_id": None,
+    })
+
+    await q.edit_message_text(
+        f"🃏 *БЛЭКДЖЕК ПвП*\n\n"
+        f"⏳ *Ожидание соперника...*\n\n"
+        f"Ставка: *{_fmt(bet)} 💰*\n\n"
+        "_Как только кто-то присоединится, тебе придёт сообщение._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="casino_bjpvp_cancel"),
+        ]]),
+    )
+
+
+async def cb_casino_bjpvp_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guest joins a PvP lobby, deals hands, starts game."""
+    q   = update.callback_query
+    uid = q.from_user.id
+    try:
+        host_id = int(q.data[len("casino_bjpvp_join_"):])
+    except ValueError:
+        await q.answer("Ошибка.", show_alert=True); return
+
+    if host_id == uid:
+        await q.answer("Нельзя играть с собой!", show_alert=True); return
+
+    my_pa = db.get_pending_action(uid)
+    if my_pa and my_pa.get("action") in ("in_game", "my_turn", "solo_game", "bj_solo", "bj_pvp_host", "bj_pvp_guest"):
+        await q.answer("Ты уже в игре!", show_alert=True); return
+
+    host_pa = db.get_pending_action(host_id)
+    if not host_pa or host_pa.get("action") != "bj_pvp_host":
+        await q.answer("Лобби уже не существует.", show_alert=True); return
+    host_data = host_pa["data"]
+    if host_data.get("status") != "waiting":
+        await q.answer("Игра уже началась.", show_alert=True); return
+
+    bet = host_data["bet"]
+    ok, _ = db.spend_coins(uid, bet)
+    if not ok:
+        await q.answer(f"Нужно {_fmt(bet)} 💰 для этой ставки!", show_alert=True); return
+    await q.answer("⚔️ Игра начинается!")
+
+    deck             = _bj_make_deck()
+    host_hand, deck  = _bj_deal_hand(deck)
+    guest_hand, deck = _bj_deal_hand(deck)
+    deck_copy        = list(deck)
+
+    guest_id   = uid
+    host_user  = db.get_user(host_id)
+    guest_user = db.get_user(guest_id)
+    host_name  = host_user.get("display_name",  "???") if host_user  else "???"
+    guest_name = guest_user.get("display_name", "???") if guest_user else "???"
+
+    host_done  = _bj_hand_val(host_hand)  == 21
+    guest_done = _bj_hand_val(guest_hand) == 21
+
+    host_data.update({
+        "status":   "playing",
+        "hand":     host_hand,
+        "deck":     deck_copy,
+        "done":     host_done,
+        "guest_id": guest_id,
+    })
+    db.set_pending_action(host_id, "bj_pvp_host", host_data)
+
+    guest_state = {
+        "host_id": host_id,
+        "bet":     bet,
+        "hand":    guest_hand,
+        "deck":    deck_copy,
+        "done":    guest_done,
+    }
+    db.set_pending_action(guest_id, "bj_pvp_guest", guest_state)
+
+    # Instant resolve if both have 21 on deal
+    if host_done and guest_done:
+        await q.edit_message_text(
+            "🃏 *БЛЭКДЖЕК ПвП*\n\n⚡ У обоих 21 с первых карт! Считаем результат...",
+            parse_mode="Markdown",
+        )
+        await _bj_pvp_finish(ctx, host_id, host_data, guest_id, guest_state)
+        return
+
+    # Notify host
+    host_msg = (
+        f"🃏 *БЛЭКДЖЕК ПвП* — Игра началась!\n\n"
+        f"Соперник: *{guest_name}*\n\n"
+        f"{_bj_pvp_board(host_hand, guest_name, bet)}"
+    )
+    if host_done:
+        host_msg += "\n\n♠ *Блэкджек (21)! Ты автоматически встал.*\n_Ждём соперника..._"
+        host_kb   = None
+    else:
+        host_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("👆 Ещё",  callback_data="casino_bjpvp_hit"),
+            InlineKeyboardButton("✋ Стоп", callback_data="casino_bjpvp_stand"),
+        ]])
+    try:
+        await ctx.bot.send_message(host_id, host_msg, parse_mode="Markdown", reply_markup=host_kb)
+    except Exception:
+        pass
+
+    # Show guest their board
+    guest_msg = (
+        f"🃏 *БЛЭКДЖЕК ПвП* — Игра началась!\n\n"
+        f"Соперник: *{host_name}*\n\n"
+        f"{_bj_pvp_board(guest_hand, host_name, bet)}"
+    )
+    if guest_done:
+        guest_msg += "\n\n♠ *Блэкджек (21)! Ты автоматически встал.*\n_Ждём соперника..._"
+        guest_kb   = None
+    else:
+        guest_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("👆 Ещё",  callback_data="casino_bjpvp_hit"),
+            InlineKeyboardButton("✋ Стоп", callback_data="casino_bjpvp_stand"),
+        ]])
+
+    await q.edit_message_text(guest_msg, parse_mode="Markdown", reply_markup=guest_kb)
+
+
+async def cb_casino_bjpvp_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel a waiting PvP lobby and refund bet."""
+    q   = update.callback_query
+    uid = q.from_user.id
+
+    pa = db.get_pending_action(uid)
+    if not pa or pa.get("action") != "bj_pvp_host":
+        await q.answer("Лобби не найдено.", show_alert=True); return
+
+    data = pa["data"]
+    if data.get("status") != "waiting":
+        await q.answer("Игра уже началась — отмена невозможна.", show_alert=True); return
+
+    bet     = data["bet"]
+    new_bal = db.add_coins(uid, bet)
+    db.clear_pending_action(uid)
+    await q.answer("❌ Лобби отменено.")
+
+    await q.edit_message_text(
+        f"❌ *Лобби отменено*\n\n"
+        f"Ставка *{_fmt(bet)} 💰* возвращена.\n\n"
+        f"💼 Баланс: *{_fmt(new_bal)} 💰*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🃏 Блэкджек", callback_data="casino_bj"),
+            InlineKeyboardButton("◀ Казино",    callback_data="casino_menu"),
+        ]]),
+    )
+
+
+async def cb_casino_bjpvp_hit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q   = update.callback_query
+    uid = q.from_user.id
+
+    action, data, opp_id = _bj_pvp_get_state(uid)
+    if not action:
+        await q.answer("Игра не найдена.", show_alert=True); return
+    if data.get("status") == "waiting":
+        await q.answer("Игра ещё не началась.", show_alert=True); return
+    if data.get("done"):
+        await q.answer("Ты уже закончил ход.", show_alert=True); return
+
+    await q.answer()
+
+    hand = data["hand"]
+    deck = data["deck"]
+    bet  = data["bet"]
+
+    card, deck   = _bj_deal_one(deck)
+    hand.append(card)
+    data["hand"] = hand
+    data["deck"] = deck
+
+    opp_user = db.get_user(opp_id) if opp_id else None
+    opp_name = opp_user.get("display_name", "???") if opp_user else "???"
+
+    if _bj_status(hand) == "bust":
+        data["done"] = True
+        db.set_pending_action(uid, action, data)
+        pv = _bj_hand_val(hand)
+        await q.edit_message_text(
+            f"🃏 *БЛЭКДЖЕК ПвП*\n\n"
+            f"👤 *Твои карты:* `{_bj_hand_str(hand)}`   _{pv}_\n"
+            f"🤝 *Соперник ({opp_name}):* карты скрыты\n\n"
+            f"💥 *ПЕРЕБОР! {pv} > 21*\n\n"
+            "_Ожидаем соперника..._",
+            parse_mode="Markdown",
+        )
+        await _bj_pvp_check_finish(ctx, uid)
+        return
+
+    db.set_pending_action(uid, action, data)
+
+    await q.edit_message_text(
+        f"🃏 *БЛЭКДЖЕК ПвП*\n\n"
+        f"{_bj_pvp_board(hand, opp_name, bet)}\n\nТвой ход:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("👆 Ещё",  callback_data="casino_bjpvp_hit"),
+            InlineKeyboardButton("✋ Стоп", callback_data="casino_bjpvp_stand"),
+        ]]),
+    )
+
+
+async def cb_casino_bjpvp_stand(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q   = update.callback_query
+    uid = q.from_user.id
+
+    action, data, opp_id = _bj_pvp_get_state(uid)
+    if not action:
+        await q.answer("Игра не найдена.", show_alert=True); return
+    if data.get("status") == "waiting":
+        await q.answer("Игра ещё не началась.", show_alert=True); return
+    if data.get("done"):
+        await q.answer("Ты уже закончил ход.", show_alert=True); return
+
+    await q.answer("✋ Стоп!")
+
+    data["done"] = True
+    db.set_pending_action(uid, action, data)
+
+    hand = data["hand"]
+    pv   = _bj_hand_val(hand)
+    bet  = data["bet"]
+
+    opp_user = db.get_user(opp_id) if opp_id else None
+    opp_name = opp_user.get("display_name", "???") if opp_user else "???"
+
+    await q.edit_message_text(
+        f"🃏 *БЛЭКДЖЕК ПвП*\n\n"
+        f"👤 *Твои карты:* `{_bj_hand_str(hand)}`   _{pv}_\n"
+        f"🤝 *Соперник ({opp_name}):* карты скрыты\n\n"
+        f"✋ *Стоп — ждём соперника...*\n\n"
+        f"Ставка: *{_fmt(bet)} 💰*",
+        parse_mode="Markdown",
+    )
+    await _bj_pvp_check_finish(ctx, uid)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1262,24 +1742,33 @@ def casino_handlers() -> list[tuple[str, object]]:
     """Возвращает список (pattern, handler) для регистрации в create_application()."""
     return [
         # Menu
-        ("^casino_menu$",        cb_casino_menu),
+        ("^casino_menu$",            cb_casino_menu),
         # Roulette
-        ("^casino_roulette$",    cb_casino_roulette),
-        ("^casino_spin_",        cb_casino_spin),
+        ("^casino_roulette$",        cb_casino_roulette),
+        ("^casino_spin_",            cb_casino_spin),
         # Slots — более специфичные паттерны ПЕРВЫМИ
-        ("^casino_bonusspin_",   cb_casino_bonus_spin),
-        ("^casino_bonusbuy_",    cb_casino_bonus_buy),
-        ("^casino_slotspin_",    cb_casino_slots_spin),
-        ("^casino_slots$",       cb_casino_slots),
-        # Blackjack
-        ("^casino_bj$",          cb_casino_bj),
-        ("^casino_bjbet_",       cb_casino_bj_bet),
-        ("^casino_bjhit$",       cb_casino_bj_hit),
-        ("^casino_bjstand$",     cb_casino_bj_stand),
-        ("^casino_bjdouble$",    cb_casino_bj_double),
+        ("^casino_bonusspin_",       cb_casino_bonus_spin),
+        ("^casino_bonusbuy_",        cb_casino_bonus_buy),
+        ("^casino_slotspin_",        cb_casino_slots_spin),
+        ("^casino_slots$",           cb_casino_slots),
+        # Blackjack PvP — специфичные паттерны ПЕРЕД общими bj
+        ("^casino_bjpvp_join_",      cb_casino_bjpvp_join),
+        ("^casino_bjpvp_bet_",       cb_casino_bjpvp_bet),
+        ("^casino_bjpvp_cancel$",    cb_casino_bjpvp_cancel),
+        ("^casino_bjpvp_hit$",       cb_casino_bjpvp_hit),
+        ("^casino_bjpvp_stand$",     cb_casino_bjpvp_stand),
+        ("^casino_bjpvp_create$",    cb_casino_bjpvp_create),
+        ("^casino_bj_pvp$",          cb_casino_bj_pvp),
+        ("^casino_bj_solo$",         cb_casino_bj_solo),
+        # Blackjack solo
+        ("^casino_bj$",              cb_casino_bj),
+        ("^casino_bjbet_",           cb_casino_bj_bet),
+        ("^casino_bjhit$",           cb_casino_bj_hit),
+        ("^casino_bjstand$",         cb_casino_bj_stand),
+        ("^casino_bjdouble$",        cb_casino_bj_double),
         # Global roulette — специфичный паттерн ПЕРВЫМ
-        ("^casino_globalbet_",   cb_casino_global_bet),
-        ("^casino_global$",      cb_casino_global),
+        ("^casino_globalbet_",       cb_casino_global_bet),
+        ("^casino_global$",          cb_casino_global),
         # Common
-        ("^casino_no_coins$",    cb_casino_no_coins),
+        ("^casino_no_coins$",        cb_casino_no_coins),
     ]

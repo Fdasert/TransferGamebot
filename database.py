@@ -358,6 +358,24 @@ def close_global_roulette_round(new_pot: int) -> None:
     }).eq("id", 1).execute()
 
 
+def get_pvp_bj_lobbies(exclude_uid: int | None = None) -> list[dict]:
+    """Return all pending_actions with action='bj_pvp_host' and status='waiting'."""
+    res = (
+        get_client()
+        .table("pending_actions")
+        .select("user_id, data")
+        .eq("action", "bj_pvp_host")
+        .execute()
+    )
+    lobbies = [
+        r for r in (res.data or [])
+        if r.get("data", {}).get("status") == "waiting"
+    ]
+    if exclude_uid is not None:
+        lobbies = [l for l in lobbies if l["user_id"] != exclude_uid]
+    return lobbies
+
+
 def apply_elo_result(
     user_a: dict,
     user_b: dict,
