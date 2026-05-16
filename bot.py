@@ -942,7 +942,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_guess(update, ctx, text, data)
     elif action == "training_guessing":
         await _handle_training_guess(update, ctx, text, data)
-    elif action in ("dbg_lookup_user", "dbg_set_coins", "dbg_set_rating"):
+    elif action in ("dbg_set_coins", "dbg_set_rating"):
         if _is_superadmin(user_id):
             await _handle_dbg_input(update, ctx, action, data)
     else:
@@ -1402,9 +1402,36 @@ def _is_superadmin(user_id: int) -> bool:
 
 def debug_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Найти игрока", callback_data="dbg_lookup")],
+        [InlineKeyboardButton("👥 Выбрать игрока", callback_data="dbg_lookup")],
         [InlineKeyboardButton("← Меню", callback_data="menu_back")],
     ])
+
+
+def _dbg_users_kb(page: int = 0) -> InlineKeyboardMarkup:
+    """Paginated list of all users for debug panel."""
+    users = db.get_all_users()
+    page_size = 8
+    start = page * page_size
+    chunk = users[start: start + page_size]
+
+    rows = []
+    for u in chunk:
+        cal = u.get("calibration_games", 0)
+        rating = u.get("rating", 0)
+        status = f"{rating}⭐" if u.get("is_calibrated") else f"cal {cal}/10"
+        label = f"{u['display_name']}  •  {status}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"dbg_su_{u['user_id']}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"dbg_up_{page - 1}"))
+    if start + page_size < len(users):
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"dbg_up_{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("← Назад", callback_data="dbg_back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def debug_user_kb(uid: int) -> InlineKeyboardMarkup:
@@ -1433,11 +1460,38 @@ async def cb_dbg_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.answer()
     if not _is_superadmin(q.from_user.id):
         return
-    await set_state(q.from_user.id, "dbg_lookup_user", {})
     await q.edit_message_text(
-        "🔍 Введи *@username* игрока:",
+        "👥 *Выбери игрока:*",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data="dbg_back")]]),
+        reply_markup=_dbg_users_kb(),
+    )
+
+
+async def cb_dbg_userpage(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pagination for debug user list: dbg_up_{page}"""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    page = int(q.data.split("_")[2])
+    await q.edit_message_reply_markup(reply_markup=_dbg_users_kb(page))
+
+
+async def cb_dbg_select_user(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """User selected from debug list: dbg_su_{uid}"""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    target = db.get_user(uid)
+    if not target:
+        await q.answer("Игрок не найден.", show_alert=True)
+        return
+    await q.edit_message_text(
+        _user_dbg_text(target),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=debug_user_kb(uid),
     )
 
 
@@ -1520,19 +1574,7 @@ async def _handle_dbg_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE, acti
     text = update.message.text.strip()
     admin_id = update.effective_user.id
 
-    if action == "dbg_lookup_user":
-        target = db.get_user_by_username(text.lstrip("@"))
-        if not target:
-            await update.message.reply_text(f"❌ Игрок *{_esc(text)}* не найден\\.", parse_mode=ParseMode.MARKDOWN_V2)
-            return
-        await set_state(admin_id, "dbg_main", {})
-        await update.message.reply_text(
-            _user_dbg_text(target),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=debug_user_kb(target["user_id"]),
-        )
-
-    elif action == "dbg_set_coins":
+    if action == "dbg_set_coins":
         uid = data["target_uid"]
         try:
             amount = int(text.replace("+", ""))
@@ -2014,6 +2056,8 @@ def create_application() -> Application:
         ("^tgh_",                 cb_training_hint),
         # Debug
         ("^dbg_lookup$",          cb_dbg_lookup),
+        ("^dbg_up_",              cb_dbg_userpage),
+        ("^dbg_su_",              cb_dbg_select_user),
         ("^dbg_back$",            cb_dbg_back),
         ("^dbg_coins_",           cb_dbg_coins),
         ("^dbg_rating_",          cb_dbg_rating),
