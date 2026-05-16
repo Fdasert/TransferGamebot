@@ -253,6 +253,19 @@ def update_round(round_id: int, **fields) -> None:
     get_client().table("game_rounds").update(fields).eq("id", round_id).execute()
 
 
+def get_user_total_guessing_score(user_id: int) -> int:
+    """Sum of points_earned for all completed rounds where user was the guesser."""
+    res = (
+        get_client()
+        .table("game_rounds")
+        .select("points_earned")
+        .eq("guesser_id", user_id)
+        .eq("completed", True)
+        .execute()
+    )
+    return sum(r.get("points_earned", 0) or 0 for r in (res.data or []))
+
+
 def get_all_rounds(game_id: int) -> list[dict]:
     res = (
         get_client()

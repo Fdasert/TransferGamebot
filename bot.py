@@ -24,7 +24,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 
 import database as db
-from scoring import calculate_points, calculate_elo, format_fee, parse_fee_input
+from scoring import calculate_points, calculate_elo, calculate_placement_rating, format_fee, parse_fee_input
 from config import (
     BOT_TOKEN,
     TOTAL_ROUNDS,
@@ -35,6 +35,9 @@ from config import (
     CALIBRATION_GAMES,
     ELO_K_CALIBRATION,
     ELO_K_RATED,
+    ELO_EXACT_BONUS,
+    ELO_CLOSE_BONUS,
+    ELO_HINT_PENALTY,
     COINS_WIN_BONUS,
     COINS_DRAW_BONUS,
     COINS_EXACT_BONUS,
@@ -200,8 +203,8 @@ async def _send_photo_message(
 
 def rating_display(user: dict) -> str:
     if not user.get("is_calibrated"):
-        remaining = CALIBRATION_GAMES - user.get("calibration_games", 0)
-        return f"Калибровка ({remaining} игр осталось)"
+        done = user.get("calibration_games", 0)
+        return f"Калибровка {done}/{CALIBRATION_GAMES}"
     return str(user["rating"])
 
 
@@ -1124,25 +1127,70 @@ async def _finish_game(
     p1 = db.get_user(p1_id)
     p2 = db.get_user(p2_id)
 
-    # Save old ratings BEFORE ELO update
+    # Calibration state BEFORE this game counts
+    was_cal1 = p1["is_calibrated"]
+    was_cal2 = p2["is_calibrated"]
+    new_cal1 = min(p1["calibration_games"] + 1, CALIBRATION_GAMES)
+    new_cal2 = min(p2["calibration_games"] + 1, CALIBRATION_GAMES)
+    just_finished_cal1 = not was_cal1 and new_cal1 >= CALIBRATION_GAMES
+    just_finished_cal2 = not was_cal2 and new_cal2 >= CALIBRATION_GAMES
+
+    # Save old ratings BEFORE any update
     old_r1 = p1["rating"]
     old_r2 = p2["rating"]
 
-    # ELO — pass rounds for skill bonuses
     rounds_p1 = [r for r in rounds if r["guesser_id"] == p1_id]
     rounds_p2 = [r for r in rounds if r["guesser_id"] == p2_id]
 
-    new_r1, new_r2, delta1, delta2 = calculate_elo(
-        p1["rating"], p2["rating"],
-        p1_score, p2_score,
-        p1["is_calibrated"], p2["is_calibrated"],
-        p1["calibration_games"], p2["calibration_games"],
-        rounds_p1, rounds_p2,
-    )
     a_won = True if winner_id == p1_id else (False if winner_id == p2_id else None)
+
+    # ── Resolve new ratings ───────────────────────────────────────────────────
+    # Rated players: standard performance ELO with skill bonuses
+    # Calibrating players: rating frozen; on game 10 → placement rating assigned
+    def _resolve_rating(
+        user: dict, pid: int, score: int,
+        opp_user: dict, opp_score: int,
+        was_calibrated: bool, just_cal: bool,
+        my_rounds: list[dict], opp_rounds: list[dict],
+    ) -> tuple[int, int, str]:
+        """Returns (new_rating, delta, mode) where mode ∈ 'elo'|'placement'|'calibrating'."""
+        if was_calibrated:
+            # Both players need ELO run — compute independently
+            nr, _, d, _ = calculate_elo(
+                user["rating"], opp_user["rating"],
+                score, opp_score,
+                True, opp_user["is_calibrated"],
+                user["calibration_games"], opp_user["calibration_games"],
+                my_rounds, opp_rounds,
+            )
+            return nr, d, "elo"
+        elif just_cal:
+            # This game completes calibration — assign placement
+            # game_rounds for this game are already saved, so query includes them
+            total_score = db.get_user_total_guessing_score(pid)
+            wins_total  = user["wins"] + (1 if winner_id == pid else 0)
+            draws_total = (
+                user["games_played"] - user["wins"] - user["losses"]
+                + (1 if winner_id is None else 0)
+            )
+            placement = calculate_placement_rating(wins_total, draws_total, CALIBRATION_GAMES, total_score)
+            return placement, placement - user["rating"], "placement"
+        else:
+            # Still calibrating — freeze rating
+            return user["rating"], 0, "calibrating"
+
+    new_r1, delta1, mode1 = _resolve_rating(
+        p1, p1_id, p1_score, p2, p2_score,
+        was_cal1, just_finished_cal1, rounds_p1, rounds_p2,
+    )
+    new_r2, delta2, mode2 = _resolve_rating(
+        p2, p2_id, p2_score, p1, p1_score,
+        was_cal2, just_finished_cal2, rounds_p2, rounds_p1,
+    )
+
     db.apply_elo_result(p1, p2, new_r1, new_r2, a_won)
 
-    # Refresh for display (updated coins, etc.)
+    # Refresh for display
     p1 = db.get_user(p1_id)
     p2 = db.get_user(p2_id)
 
@@ -1211,7 +1259,8 @@ async def _finish_game(
 
     async def _send_result(pid: int, my_score: int, opp_score: int,
                            opponent: dict, new_r: int, old_r: int, delta: int,
-                           coins_earned: int, coin_breakdown: list[str]) -> None:
+                           coins_earned: int, coin_breakdown: list[str],
+                           rating_mode: str) -> None:
         me = p1 if pid == p1_id else p2
         diff = new_r - old_r
         diff_str = f"\\+{diff}" if diff >= 0 else str(diff)
@@ -1254,29 +1303,36 @@ async def _finish_game(
         rounds_block = _rounds_block(pid)
 
         # ── Rating ──
-        is_cal = me.get("is_calibrated", False)
-        if not is_cal:
+        my_rounds_r = rounds_p1 if pid == p1_id else rounds_p2
+        if rating_mode == "calibrating":
             cal_done = me.get("calibration_games", 0)
             cal_left = max(0, CALIBRATION_GAMES - cal_done)
-            rating_block = f"🔄 *Калибровка* — ещё {cal_left} игр до рейтинга"
+            rating_block = (
+                f"🔄 *Калибровка:* {cal_done}/{CALIBRATION_GAMES} "
+                f"— ещё {cal_left} игр до рейтинга"
+            )
+        elif rating_mode == "placement":
+            rating_block = (
+                f"🎉 *Калибровка завершена\\!*\n"
+                f"Твой начальный рейтинг: *{new_r}* ⭐\n"
+                f"_\\(на основе {CALIBRATION_GAMES} калибровочных игр\\)_"
+            )
         else:
+            # Rated ELO
             arrow = "📈" if delta >= 0 else "📉"
             delta_str = f"\\+{delta}" if delta >= 0 else str(delta)
 
-            # Breakdown of delta
-            my_rounds = rounds_p1 if pid == p1_id else rounds_p2
-            base_delta = delta
-            exact_cnt = sum(1 for r in my_rounds if r.get("accuracy_tier") == "exact" and r.get("completed"))
-            close_cnt  = sum(1 for r in my_rounds if r.get("accuracy_tier") == "5pct"  and r.get("completed"))
-            hints_cnt  = sum((r.get("hints_used") or 0) for r in my_rounds if r.get("completed"))
+            exact_cnt = sum(1 for r in my_rounds_r if r.get("accuracy_tier") == "exact" and r.get("completed"))
+            close_cnt = sum(1 for r in my_rounds_r if r.get("accuracy_tier") == "5pct"  and r.get("completed"))
+            hints_cnt = sum((r.get("hints_used") or 0) for r in my_rounds_r if r.get("completed"))
 
             detail_parts = []
             if exact_cnt:
-                detail_parts.append(f"🎯×{exact_cnt} \\+{exact_cnt * 3}")
+                detail_parts.append(f"🎯×{exact_cnt} \\+{exact_cnt * ELO_EXACT_BONUS}")
             if close_cnt:
-                detail_parts.append(f"🔥×{close_cnt} \\+{close_cnt}")
+                detail_parts.append(f"🔥×{close_cnt} \\+{close_cnt * ELO_CLOSE_BONUS}")
             if hints_cnt:
-                detail_parts.append(f"💡×{hints_cnt} \\-{hints_cnt}")
+                detail_parts.append(f"💡×{hints_cnt} \\-{hints_cnt * ELO_HINT_PENALTY}")
             detail = f" _\\({', '.join(detail_parts)}\\)_" if detail_parts else ""
 
             rating_block = (
@@ -1310,8 +1366,8 @@ async def _finish_game(
         except TelegramError as e:
             logger.warning("Could not send result to %s: %s", pid, e)
 
-    await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, delta1, p1_coins, p1_coin_breakdown)
-    await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, delta2, p2_coins, p2_coin_breakdown)
+    await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, delta1, p1_coins, p1_coin_breakdown, mode1)
+    await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, delta2, p2_coins, p2_coin_breakdown, mode2)
 
 
 # ── Rematch ───────────────────────────────────────────────────────────────────

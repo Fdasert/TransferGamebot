@@ -2,6 +2,32 @@
 from config import ACCURACY_TIERS, ELO_K_CALIBRATION, ELO_K_RATED, CALIBRATION_GAMES
 
 
+def calculate_placement_rating(
+    wins: int,
+    draws: int,
+    total_games: int,
+    total_guessing_score: int,
+) -> int:
+    """
+    Calculate initial rating after completing calibration.
+
+    Components (both 0.0–1.0):
+      win_rate   = (wins + 0.5 * draws) / total_games         — place quality
+      score_rate = total_guessing_score / max_possible_score   — accuracy quality
+                   max = CALIBRATION_GAMES × 3 rounds × 10 pts
+
+    Weights: 40% win_rate + 60% score_rate
+    Range:   600 (worst) → 1400 (perfect)
+    """
+    if total_games == 0:
+        return 1000
+    win_rate = (wins + 0.5 * draws) / total_games
+    max_score = CALIBRATION_GAMES * 3 * 10  # 3 guessing rounds × 10 max pts × 10 games
+    score_rate = min(total_guessing_score / max_score, 1.0)
+    perf = 0.4 * win_rate + 0.6 * score_rate
+    return round(600 + perf * 800)
+
+
 def calculate_deviation(guess: int, actual: int) -> float:
     if actual == 0:
         return 0.0 if guess == 0 else 100.0
