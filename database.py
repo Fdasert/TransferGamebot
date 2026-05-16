@@ -101,7 +101,7 @@ def get_transfers_by_club(club_id: str, limit: int = 20) -> list[dict]:
         .eq("club_id", club_id)
         .not_.is_("transfer_fee", "null")
         .gt("transfer_fee", 0)
-        .order("id", desc=True)
+        .order("transfer_fee", desc=True)
         .limit(limit)
         .execute()
     )
