@@ -519,14 +519,8 @@ async def cb_play_random(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     # Check if someone else is in the queue
-    # We store the queue in a special pending_action with user_id=0 — but Supabase requires unique keys,
-    # so instead we search for any user with action="in_random_queue"
-    # For simplicity we store it per-user and scan for a match
-    from supabase import create_client
-    from config import SUPABASE_URL, SUPABASE_KEY
-    client = create_client(SUPABASE_URL, SUPABASE_KEY)
     res = (
-        client.table("pending_actions")
+        db.get_client().table("pending_actions")
         .select("user_id, data")
         .eq("action", "in_random_queue")
         .neq("user_id", user_id)
@@ -883,6 +877,7 @@ def _build_hint_lines(transfer: dict, used_hint_types: list[str]) -> list[str]:
 
 async def cb_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
+    await q.answer()  # acknowledge immediately so button doesn't spin
     user_id = q.from_user.id
     action, data = await get_state(user_id)
 
@@ -1123,8 +1118,15 @@ async def _finish_game(
 
     db.finish_game(game_id, winner_id, p1_score, p2_score)
 
+    # Fetch rounds first — needed for ELO skill bonuses
+    rounds = db.get_all_rounds(game_id)
+
     p1 = db.get_user(p1_id)
     p2 = db.get_user(p2_id)
+
+    # Save old ratings BEFORE ELO update
+    old_r1 = p1["rating"]
+    old_r2 = p2["rating"]
 
     # ELO — pass rounds for skill bonuses
     rounds_p1 = [r for r in rounds if r["guesser_id"] == p1_id]
@@ -1140,10 +1142,9 @@ async def _finish_game(
     a_won = True if winner_id == p1_id else (False if winner_id == p2_id else None)
     db.apply_elo_result(p1, p2, new_r1, new_r2, a_won)
 
+    # Refresh for display (updated coins, etc.)
     p1 = db.get_user(p1_id)
     p2 = db.get_user(p2_id)
-
-    rounds = db.get_all_rounds(game_id)
 
     # Pre-fetch transfer names for the breakdown
     transfer_names: dict[int, str] = {}
@@ -1308,9 +1309,6 @@ async def _finish_game(
             )
         except TelegramError as e:
             logger.warning("Could not send result to %s: %s", pid, e)
-
-    old_r1 = p1["rating"]
-    old_r2 = p2["rating"]
 
     await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, delta1, p1_coins, p1_coin_breakdown)
     await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, delta2, p2_coins, p2_coin_breakdown)
@@ -1698,7 +1696,7 @@ async def cb_training_pick_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     club_id = q.data[4:]  # strip "tgc_"
     transfers = db.get_transfers_by_club(club_id)
     if not transfers:
-        await q.answer("У этого клуба нет трансферов в базе\\.", show_alert=True)
+        await q.answer("У этого клуба нет трансферов в базе.", show_alert=True)
         return
     state["club_id"] = club_id
     await set_state(user_id, "training_picking_transfer", state)
@@ -1747,10 +1745,11 @@ async def cb_training_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TY
 
 async def cb_training_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
+    await q.answer()  # acknowledge immediately so button doesn't spin
     user_id = q.from_user.id
     action, data = await get_state(user_id)
     if action != "training_guessing":
-        await q.answer("Сейчас не твоя очередь угадывать\\.", show_alert=True)
+        await q.answer("Сейчас не твоя очередь угадывать.", show_alert=True)
         return
 
     hint_type = q.data[4:]  # strip "tgh_"

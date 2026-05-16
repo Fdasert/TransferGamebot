@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from supabase import create_client, Client
-from config import SUPABASE_URL, SUPABASE_KEY
+from config import SUPABASE_URL, SUPABASE_KEY, CALIBRATION_GAMES
 
 logger = logging.getLogger(__name__)
 
@@ -287,10 +287,11 @@ def apply_elo_result(
     a_id = user_a["user_id"]
     b_id = user_b["user_id"]
 
-    cal_a = user_a["calibration_games"] + 1
-    cal_b = user_b["calibration_games"] + 1
-    is_cal_a = cal_a >= 10
-    is_cal_b = cal_b >= 10
+    # Only increment calibration counter until the threshold is reached
+    cal_a = min(user_a["calibration_games"] + 1, CALIBRATION_GAMES)
+    cal_b = min(user_b["calibration_games"] + 1, CALIBRATION_GAMES)
+    is_cal_a = user_a["is_calibrated"] or cal_a >= CALIBRATION_GAMES
+    is_cal_b = user_b["is_calibrated"] or cal_b >= CALIBRATION_GAMES
 
     update_user(
         a_id,
