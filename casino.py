@@ -176,39 +176,52 @@ def _eval_bonus_spin(s1: str, s2: str, s3: str) -> tuple[str, int, bool, str]:
 
 
 def _slot_board(r1: str, r2: str, r3: str) -> str:
-    return f"[ {r1}  {r2}  {r3} ]"
+    return f"{r1}  {r2}  {r3}"
 
 
 def _slot_result_text(kind: str, mult: int, s1: str, s2: str, s3: str,
                       bet: int, new_balance: int, bonus: bool = False) -> str:
-    board = f"*{_slot_board(s1, s2, s3)}*"
     b_tag = "🌟 *БОНУС* " if bonus else ""
+    board = _slot_board(s1, s2, s3)
+
     if kind == "miss":
         return (
-            f"🎰 {b_tag}*СЛОТЫ*\n\n{board}\n\n"
+            f"🎰 {b_tag}*СЛОТЫ*\n\n"
+            f"{board}\n\n"
             f"💀 *Мимо* — ставка сгорела\n\n"
             f"💼 Баланс: *{_fmt(new_balance)} 💰*"
         )
+
     if kind == "double":
-        match_sym = s1 if (s1 == s2 or s1 == s3) else s2
         return (
-            f"🎰 {b_tag}*СЛОТЫ*\n\n{board}\n\n"
-            f"🔄 *Пара {match_sym} {match_sym}* — ставка возвращается!\n\n"
+            f"🎰 {b_tag}*СЛОТЫ*\n\n"
+            f"{board}\n\n"
+            f"🔄 *Пара!* — ставка возвращается\n\n"
             f"💼 Баланс: *{_fmt(new_balance)} 💰*"
         )
+
+    # triple
     winnings = bet * mult
     net_gain = winnings - bet
-    hdr = (
-        "🏆 *ДЖЕКПОТ!*"        if s1 == "⭐" else
-        "💥 *МЕГА-ТРОЙКА!*"    if mult >= 75 else
-        f"✨ *ТРОЙКА! ({s1}{s1}{s1})*" if bonus else
-        f"🎉 *ТРОЙКА! ({s1}{s1}{s1})*"
-    )
+    if s1 == "⭐":
+        hdr   = "🏆 *Д Ж Е К П О Т !* 🏆"
+        deco  = "⭐  ⭐  ⭐"
+    elif mult >= 75:
+        hdr   = "💥 *М Е Г А - Т Р О Й К А !* 💥"
+        deco  = f"{s1}  {s1}  {s1}"
+    elif bonus:
+        hdr   = f"✨ *Т Р О Й К А !* ✨"
+        deco  = f"{s1}  {s1}  {s1}"
+    else:
+        hdr   = f"🎉 *Т Р О Й К А !* 🎉"
+        deco  = f"{s1}  {s1}  {s1}"
+
     return (
-        f"🎰 {b_tag}*СЛОТЫ*\n\n{board}\n\n"
-        f"{hdr} — ×{mult}\n\n"
-        f"Ставка: *{_fmt(bet)} 💰*\n"
-        f"Выплата: *{_fmt(winnings)} 💰* _(+{_fmt(net_gain)} 💰)_\n\n"
+        f"🎰 {b_tag}*СЛОТЫ*\n\n"
+        f"{hdr}\n\n"
+        f"{deco}\n\n"
+        f"×{mult}  —  Ставка: *{_fmt(bet)} 💰*\n"
+        f"Выплата: *{_fmt(winnings)} 💰*  _(+{_fmt(net_gain)} 💰)_\n\n"
         f"💼 Баланс: *{_fmt(new_balance)} 💰*"
     )
 
@@ -229,8 +242,8 @@ def _bonus_progress_bar(level: int, spin_num: int, remaining: int) -> str:
 
 
 def _bonus_board_block(s1: str, s2: str, s3: str, level: int) -> str:
-    label = {1: "🥉 BRONZE", 2: "🥈 SILVER", 3: "🥇 GOLD"}[level]
-    return f"_{label}_\n*{_slot_board(s1, s2, s3)}*"
+    label = {1: "🥉 Bronze", 2: "🥈 Silver", 3: "🥇 Gold"}[level]
+    return f"_{label}_\n{_slot_board(s1, s2, s3)}"
 
 
 def _bonus_outcome_text(kind: str, base_mult: int, bm: int, disp_sym: str,
@@ -391,9 +404,12 @@ async def cb_casino_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     text = (
         "🎰 *КАЗИНО*\n\n"
-        f"💰 Твой баланс: *{_fmt(coins)}* монет\n\n"
-        f"🌍 Глобальный котёл: *{_fmt(pot)} 💰*\n\n"
-        f"{_WHEEL_DISPLAY}"
+        f"💰 Баланс: *{_fmt(coins)}* монет\n"
+        f"🌍 Глобальный котёл: *{_fmt(pot)}* монет\n\n"
+        "🎡 *Рулетка* — крути колесо, выиграй до ×25\n"
+        "🎰 *Слоты* — три символа, джекпот ×150\n"
+        "🃏 *Блэкджек* — набери 21, бей дилера\n"
+        "🌍 *Глоб. рулетка* — общий котёл, большие призы"
     )
     rows = [
         [InlineKeyboardButton("🎡 Рулетка",        callback_data="casino_roulette"),
@@ -429,7 +445,10 @@ async def cb_casino_roulette(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     rows.append([InlineKeyboardButton("◀ Назад", callback_data="casino_menu")])
 
     await q.edit_message_text(
-        f"🎡 *РУЛЕТКА*\n\n💰 Баланс: *{_fmt(coins)}* монет\n\nВыбери ставку — и крути!",
+        f"🎡 *РУЛЕТКА*\n\n"
+        f"💰 Баланс: *{_fmt(coins)}* монет\n\n"
+        f"{_WHEEL_DISPLAY}\n\n"
+        "Выбери ставку — и крути!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows),
     )
@@ -601,7 +620,7 @@ async def cb_casino_slots_spin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
         for f1, f2, f3 in [(spin, spin, spin), (s1, spin, spin), (s1, s2, spin)]:
             await q.edit_message_text(
-                f"🎰 *СЛОТЫ*\n\n*{_slot_board(f1, f2, f3)}*\n\n_Ставка: {_fmt(bet)} 💰_",
+                f"🎰 *СЛОТЫ*\n\n{_slot_board(f1, f2, f3)}\n\n_Ставка: {_fmt(bet)} 💰_",
                 parse_mode="Markdown",
             )
             await asyncio.sleep(0.45)
