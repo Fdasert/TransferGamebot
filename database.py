@@ -252,6 +252,15 @@ def get_all_rounds(game_id: int) -> list[dict]:
 
 # ── ELO update after game ────────────────────────────────────────────────────
 
+def add_coins(user_id: int, amount: int) -> None:
+    """Increment coins for a user."""
+    from supabase import create_client
+    client = get_client()
+    user = get_user(user_id)
+    current = user.get("coins", 0) if user else 0
+    client.table("users").update({"coins": current + amount}).eq("user_id", user_id).execute()
+
+
 def apply_elo_result(
     user_a: dict,
     user_b: dict,

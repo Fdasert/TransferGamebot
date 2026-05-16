@@ -37,6 +37,11 @@ ACCURACY_TIERS = [
 ]
 # Outside 20% → 0 points
 
+# Coin rewards
+COINS_WIN_BONUS   = 20
+COINS_DRAW_BONUS  = 10
+COINS_EXACT_BONUS = 5   # per exact guess
+
 TIER_LABELS = {
     "exact": "🎯 ТОЧНОЕ ПОПАДАНИЕ!",
     "5pct":  "🔥 Почти идеал!",

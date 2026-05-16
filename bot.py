@@ -35,6 +35,9 @@ from config import (
     CALIBRATION_GAMES,
     ELO_K_CALIBRATION,
     ELO_K_RATED,
+    COINS_WIN_BONUS,
+    COINS_DRAW_BONUS,
+    COINS_EXACT_BONUS,
 )
 
 logging.basicConfig(
@@ -140,10 +143,12 @@ def profile_text(user: dict) -> str:
     gp = user.get("games_played", 0)
     wins = user.get("wins", 0)
     losses = user.get("losses", 0)
+    coins = user.get("coins", 0)
     wr = f"{wins/gp*100:.0f}%" if gp else "—"
     return (
         f"👤 *{_esc(user['display_name'])}*\n"
         f"🏅 Рейтинг: *{_esc(rating_display(user))}*\n"
+        f"🪙 Монеты: *{coins}*\n"
         f"🎮 Игр: {gp} \\| ✅ Побед: {wins} \\| ❌ Поражений: {losses}\n"
         f"📊 Винрейт: {wr}"
     )
@@ -1048,6 +1053,34 @@ async def _finish_game(
 
     TIER_ICON = {"exact": "🎯", "5pct": "🔥", "10pct": "👍", "20pct": "😅", "miss": "❌"}
 
+    def _calculate_coins(player_id: int, my_score: int) -> tuple[int, list[str]]:
+        """Returns (total_coins, breakdown_lines)."""
+        breakdown = []
+        total = my_score
+        breakdown.append(f"🎮 Очки в игре: \\+{my_score}")
+
+        # Win/draw bonus
+        if winner_id == player_id:
+            total += COINS_WIN_BONUS
+            breakdown.append(f"🏆 Бонус за победу: \\+{COINS_WIN_BONUS}")
+        elif winner_id is None:
+            total += COINS_DRAW_BONUS
+            breakdown.append(f"🤝 Бонус за ничью: \\+{COINS_DRAW_BONUS}")
+
+        # Exact guess bonus
+        exact_count = sum(
+            1 for r in rounds
+            if r["guesser_id"] == player_id
+            and r.get("accuracy_tier") == "exact"
+            and r["completed"]
+        )
+        if exact_count:
+            bonus = exact_count * COINS_EXACT_BONUS
+            total += bonus
+            breakdown.append(f"🎯 Точных попаданий ×{exact_count}: \\+{bonus}")
+
+        return total, breakdown
+
     def _rounds_block(player_id: int) -> str:
         lines = []
         total = 0
@@ -1066,8 +1099,15 @@ async def _finish_game(
         lines.append(f"\n*Итого: {total} очков*")
         return "\n".join(lines) if lines else "—"
 
+    # Calculate and award coins
+    p1_coins, p1_coin_breakdown = _calculate_coins(p1_id, p1_score)
+    p2_coins, p2_coin_breakdown = _calculate_coins(p2_id, p2_score)
+    db.add_coins(p1_id, p1_coins)
+    db.add_coins(p2_id, p2_coins)
+
     async def _send_result(pid: int, my_score: int, opp_score: int,
-                           opponent: dict, new_r: int, old_r: int) -> None:
+                           opponent: dict, new_r: int, old_r: int,
+                           coins_earned: int, coin_breakdown: list[str]) -> None:
         me = p1 if pid == p1_id else p2
         diff = new_r - old_r
         diff_str = f"\\+{diff}" if diff >= 0 else str(diff)
@@ -1121,11 +1161,20 @@ async def _finish_game(
                 f"{arrow} *Рейтинг:* {old_r} → *{new_r}* \\({diff_str}\\)"
             )
 
+        # ── Coins ──
+        coin_lines = "\n".join(coin_breakdown)
+        coins_block = (
+            f"💰 *Заработано монет:* \\+{coins_earned}\n"
+            f"{coin_lines}\n"
+            f"*Баланс: {me.get('coins', 0) + coins_earned} 🪙*"
+        )
+
         text = (
             f"{header}\n\n"
             f"{score_block}\n\n"
             f"*Твои угадывания:*\n"
             f"{rounds_block}\n\n"
+            f"{coins_block}\n\n"
             f"{rating_block}"
         )
 
@@ -1142,8 +1191,8 @@ async def _finish_game(
     old_r1 = p1["rating"]
     old_r2 = p2["rating"]
 
-    await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1)
-    await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2)
+    await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, p1_coins, p1_coin_breakdown)
+    await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, p2_coins, p2_coin_breakdown)
 
 
 # ── Rematch ───────────────────────────────────────────────────────────────────
