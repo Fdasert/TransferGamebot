@@ -7,7 +7,7 @@ SUPABASE_KEY = os.getenv(
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdoaHNjd25jZHJtcnBvYmR5aHFrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODkzMjk0MCwiZXhwIjoyMDk0NTA4OTQwfQ.PUW0pibcZ9V2AwpqnHriKU9lkI8aavgO1VfkYRDpWJg",
 )
 
-SUPERADMIN_IDS: list[int] = []
+SUPERADMIN_IDS: list[int] = [518544601]
 
 TRANSFERMARKT_API_URL = os.getenv("TRANSFERMARKT_API_URL", "http://localhost:8000")
 
