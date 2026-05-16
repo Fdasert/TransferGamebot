@@ -97,12 +97,18 @@ def _fetch_player_transfers(player_id: str, player_info: dict, club_id: str, clu
     """
     from scoring import format_fee
 
-    data = _get(f"/players/{player_id}/transfers")
-    if not data:
+    transfers_data = _get(f"/players/{player_id}/transfers")
+    if not transfers_data:
         return []
 
+    # Fetch player profile for photo_url
+    photo_url = None
+    profile_data = _get(f"/players/{player_id}/profile")
+    if profile_data:
+        photo_url = profile_data.get("imageUrl") or profile_data.get("image_url")
+
     rows = []
-    for t in data.get("transfers", []):
+    for t in transfers_data.get("transfers", []):
         club_to = t.get("clubTo") or {}
         if str(club_to.get("id", "")) != club_id:
             continue
@@ -124,6 +130,8 @@ def _fetch_player_transfers(player_id: str, player_info: dict, club_id: str, clu
         rows.append({
             "club_id": club_id,
             "player_name": player_info.get("name", ""),
+            "player_id": player_id,
+            "photo_url": photo_url,
             "transfer_fee": int(fee),
             "fee_display": format_fee(fee),
             "season": t.get("season", ""),

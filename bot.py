@@ -131,6 +131,71 @@ def result_kb() -> InlineKeyboardMarkup:
     ])
 
 
+# ── Photo helper ─────────────────────────────────────────────────────────────
+
+# In-memory cache: photo_url → telegram file_id (avoids re-uploading)
+_photo_file_id_cache: dict[str, str] = {}
+
+PHOTO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Referer": "https://www.transfermarkt.com/",
+}
+
+
+async def _fetch_photo_bytes(url: str) -> bytes | None:
+    """Download photo bytes in a thread so we don't block the event loop."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(headers=PHOTO_HEADERS, timeout=10) as client:
+            r = await client.get(url)
+            if r.status_code == 200:
+                return r.content
+    except Exception as e:
+        logger.debug("Photo fetch failed for %s: %s", url, e)
+    return None
+
+
+async def _send_photo_message(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    photo_url: str | None,
+    caption: str,
+    reply_markup=None,
+) -> Message:
+    """Send message with player photo if available, else plain text."""
+    if photo_url:
+        # Check cache first
+        file_id = _photo_file_id_cache.get(photo_url)
+        if file_id:
+            try:
+                return await ctx.bot.send_photo(
+                    chat_id, photo=file_id, caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup,
+                )
+            except TelegramError:
+                pass  # cache miss / expired — re-download
+
+        photo_bytes = await _fetch_photo_bytes(photo_url)
+        if photo_bytes:
+            try:
+                msg = await ctx.bot.send_photo(
+                    chat_id, photo=photo_bytes, caption=caption,
+                    parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup,
+                )
+                # Cache the file_id returned by Telegram
+                if msg.photo:
+                    _photo_file_id_cache[photo_url] = msg.photo[-1].file_id
+                return msg
+            except TelegramError as e:
+                logger.debug("send_photo failed: %s", e)
+
+    # Fallback: plain text
+    return await ctx.bot.send_message(
+        chat_id, caption,
+        parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup,
+    )
+
+
 # ── Formatting ───────────────────────────────────────────────────────────────
 
 def rating_display(user: dict) -> str:
@@ -684,12 +749,8 @@ async def _send_guess_prompt(
         for h in available:
             kb_rows.append([InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"gh_{h}")])
 
-    await ctx.bot.send_message(
-        guesser_id,
-        text,
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None,
-    )
+    kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
+    await _send_photo_message(ctx, guesser_id, transfer.get("photo_url"), text, kb)
 
 
 def _build_hint_lines(transfer: dict, used_hint_types: list[str]) -> list[str]:
@@ -1490,14 +1551,12 @@ async def _training_next_round(
         await set_state(user_id, "training_guessing", state)
 
         kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in HINT_TYPES]
-        await ctx.bot.send_message(
-            user_id,
+        caption = (
             f"🤖 Раунд *{round_num}/{TOTAL_ROUNDS}* — Бот выбрал трансфер:\n\n"
             f"👤 Игрок: *{_esc(transfer['player_name'])}*\n\n"
-            f"💰 Назови сумму трансфера:\n_Например: 45M, 45000000, 500K_",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup(kb_rows),
+            f"💰 Назови сумму трансфера:\n_Например: 45M, 45000000, 500K_"
         )
+        await _send_photo_message(ctx, user_id, transfer.get("photo_url"), caption, InlineKeyboardMarkup(kb_rows))
     else:
         # Player picks → show league selector
         state_copy = dict(state)
