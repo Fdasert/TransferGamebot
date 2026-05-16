@@ -1294,12 +1294,9 @@ async def cb_casino_bjpvp_bet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     await q.answer()
 
     db.set_pending_action(uid, "bj_pvp_host", {
-        "bet":      bet,
-        "status":   "waiting",
-        "hand":     None,
-        "deck":     None,
-        "done":     False,
-        "guest_id": None,
+        "bet":    bet,
+        "status": "waiting",
+        "done":   False,
     })
 
     await q.edit_message_text(

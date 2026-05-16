@@ -159,6 +159,8 @@ def get_pending_action(user_id: int) -> dict | None:
         .table("pending_actions")
         .select("action, data")
         .eq("user_id", user_id)
+        .order("updated_at", desc=True)
+        .limit(1)
         .execute()
     )
     return res.data[0] if res.data else None
@@ -172,7 +174,7 @@ def set_pending_action(user_id: int, action: str, data: dict) -> None:
         "data": data,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    get_client().table("pending_actions").upsert(row).execute()
+    get_client().table("pending_actions").upsert(row, on_conflict="user_id").execute()
 
 
 def clear_pending_action(user_id: int) -> None:
