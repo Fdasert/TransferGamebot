@@ -84,7 +84,7 @@ def leagues_kb() -> InlineKeyboardMarkup:
 
 def clubs_kb(league_id: str, page: int = 0) -> InlineKeyboardMarkup:
     clubs = db.get_clubs_by_league(league_id)
-    page_size = 8
+    page_size = 10
     start = page * page_size
     chunk = clubs[start: start + page_size]
 
@@ -1607,9 +1607,22 @@ def training_leagues_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def training_clubs_kb(league_id: str) -> InlineKeyboardMarkup:
+def training_clubs_kb(league_id: str, page: int = 0) -> InlineKeyboardMarkup:
     clubs = db.get_clubs_by_league(league_id)
-    rows = [[InlineKeyboardButton(c["club_name"], callback_data=f"tgc_{c['club_id']}")] for c in clubs[:12]]
+    page_size = 10
+    start = page * page_size
+    chunk = clubs[start: start + page_size]
+
+    rows = [[InlineKeyboardButton(c["club_name"], callback_data=f"tgc_{c['club_id']}")] for c in chunk]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"tgcp_{league_id}_{page - 1}"))
+    if start + page_size < len(clubs):
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"tgcp_{league_id}_{page + 1}"))
+    if nav:
+        rows.append(nav)
+
     rows.append([InlineKeyboardButton("← Назад", callback_data="training_pick_league")])
     return InlineKeyboardMarkup(rows)
 
@@ -1631,6 +1644,15 @@ async def cb_training_pick_league(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     state["league_id"] = league_id
     await set_state(user_id, "training_picking_club", state)
     await q.edit_message_reply_markup(reply_markup=training_clubs_kb(league_id))
+
+
+async def cb_training_clubs_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    # tgcp_{league_id}_{page}
+    parts = q.data[5:].rsplit("_", 1)
+    league_id, page = parts[0], int(parts[1])
+    await q.edit_message_reply_markup(reply_markup=training_clubs_kb(league_id, page))
 
 
 async def cb_training_pick_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1896,6 +1918,7 @@ def create_application() -> Application:
         ("^training_abort$",      cb_training_abort),
         ("^training_pick_league$",cb_training_back_league),
         ("^tgl_",                 cb_training_pick_league),
+        ("^tgcp_",                cb_training_clubs_page),
         ("^tgc_",                 cb_training_pick_club),
         ("^tgt_",                 cb_training_pick_transfer),
         ("^tgh_",                 cb_training_hint),
