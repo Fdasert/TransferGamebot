@@ -280,13 +280,82 @@ def get_all_rounds(game_id: int) -> list[dict]:
 
 # ── ELO update after game ────────────────────────────────────────────────────
 
-def add_coins(user_id: int, amount: int) -> None:
-    """Increment coins for a user."""
-    from supabase import create_client
-    client = get_client()
+def get_coins(user_id: int) -> int:
+    """Return current coin balance for a user."""
+    user = get_user(user_id)
+    return user.get("coins", 0) if user else 0
+
+
+def add_coins(user_id: int, amount: int) -> int:
+    """Increment coins for a user. Returns new balance."""
     user = get_user(user_id)
     current = user.get("coins", 0) if user else 0
-    client.table("users").update({"coins": current + amount}).eq("user_id", user_id).execute()
+    new_balance = current + amount
+    get_client().table("users").update({"coins": new_balance}).eq("user_id", user_id).execute()
+    return new_balance
+
+
+def spend_coins(user_id: int, amount: int) -> tuple[bool, int]:
+    """Deduct coins if sufficient. Returns (ok, new_balance).
+    If insufficient, returns (False, current_balance) without changing anything."""
+    user = get_user(user_id)
+    current = user.get("coins", 0) if user else 0
+    if current < amount:
+        return False, current
+    new_balance = current - amount
+    get_client().table("users").update({"coins": new_balance}).eq("user_id", user_id).execute()
+    return True, new_balance
+
+
+# ── Global Roulette ──────────────────────────────────────────────────────────
+
+def get_global_roulette_state() -> dict:
+    """Returns the single global_roulette row."""
+    res = get_client().table("global_roulette").select("*").eq("id", 1).execute()
+    if res.data:
+        return res.data[0]
+    return {"id": 1, "round": 0, "pot": 0, "last_spin_at": None}
+
+
+def get_global_roulette_bets(round_id: int) -> list[dict]:
+    """All bets for the given round."""
+    res = (
+        get_client()
+        .table("global_roulette_bets")
+        .select("user_id, amount")
+        .eq("round", round_id)
+        .execute()
+    )
+    return res.data or []
+
+
+def add_global_roulette_bet(user_id: int, amount: int) -> tuple[bool, int]:
+    """Spend coins and record a bet in the current round. Returns (ok, new_balance)."""
+    ok, new_balance = spend_coins(user_id, amount)
+    if not ok:
+        return False, new_balance
+
+    state = get_global_roulette_state()
+    round_id = state.get("round", 0)
+    new_pot  = state.get("pot", 0) + amount
+
+    get_client().table("global_roulette").update({"pot": new_pot}).eq("id", 1).execute()
+    get_client().table("global_roulette_bets").insert(
+        {"round": round_id, "user_id": user_id, "amount": amount}
+    ).execute()
+    return True, new_balance
+
+
+def close_global_roulette_round(new_pot: int) -> None:
+    """Advance to the next round and save the carry-over pot."""
+    from datetime import datetime, timezone
+    state     = get_global_roulette_state()
+    new_round = state.get("round", 0) + 1
+    get_client().table("global_roulette").update({
+        "round":        new_round,
+        "pot":          new_pot,
+        "last_spin_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", 1).execute()
 
 
 def apply_elo_result(
