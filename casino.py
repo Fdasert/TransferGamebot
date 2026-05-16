@@ -47,19 +47,15 @@ _ROULETTE_SECTORS = [
 _ROULETTE_BETS = [50, 100, 250, 500, 1_000, 2_500]
 
 _WHEEL_DISPLAY = (
-    "```\n"
-    "╔═══════════════════════╗\n"
-    "║  💀 Пусто      43%   ║\n"
-    "║  💣 Слив ×2     8%   ║\n"
-    "║  🔄 Возврат    10%   ║\n"
-    "║  💰 ×2         20%   ║\n"
-    "║  💎 ×3         10%   ║\n"
-    "║  🌟 ×5          4%   ║\n"
-    "║  💥 ×10         2%   ║\n"
-    "║  ⚡ ×25          1%   ║\n"
-    "║  🎁 Бонус ×3    2%   ║\n"
-    "╚═══════════════════════╝\n"
-    "```"
+    "💀 Пусто — 43%\n"
+    "💣 Слив ×2 — 8%\n"
+    "🔄 Возврат — 10%\n"
+    "💰 ×2 — 20%\n"
+    "💎 ×3 — 10%\n"
+    "🌟 ×5 — 4%\n"
+    "💥 ×10 — 2%\n"
+    "⚡ ×25 — 1%\n"
+    "🎁 Бонус ×3 — 2%"
 )
 
 _SPIN_FRAMES = [
@@ -180,16 +176,12 @@ def _eval_bonus_spin(s1: str, s2: str, s3: str) -> tuple[str, int, bool, str]:
 
 
 def _slot_board(r1: str, r2: str, r3: str) -> str:
-    return (
-        "╔═════╦═════╦═════╗\n"
-        f"║  {r1}  ║  {r2}  ║  {r3}  ║\n"
-        "╚═════╩═════╩═════╝"
-    )
+    return f"[ {r1}  {r2}  {r3} ]"
 
 
 def _slot_result_text(kind: str, mult: int, s1: str, s2: str, s3: str,
                       bet: int, new_balance: int, bonus: bool = False) -> str:
-    board = f"```\n{_slot_board(s1, s2, s3)}\n```"
+    board = f"*{_slot_board(s1, s2, s3)}*"
     b_tag = "🌟 *БОНУС* " if bonus else ""
     if kind == "miss":
         return (
@@ -237,14 +229,8 @@ def _bonus_progress_bar(level: int, spin_num: int, remaining: int) -> str:
 
 
 def _bonus_board_block(s1: str, s2: str, s3: str, level: int) -> str:
-    board = _slot_board(s1, s2, s3)
-    deco = {
-        1: ("┌─── 🥉 BRONZE ───┐", "└─────────────────┘"),
-        2: ("╔═══ 🥈 SILVER ═══╗", "╚═════════════════╝"),
-        3: ("╔⭐⭐ 🥇  GOLD ⭐⭐╗", "╚⭐⭐⭐⭐⭐⭐⭐⭐⭐╝"),
-    }
-    top, bot = deco.get(level, ("─────────────────", "─────────────────"))
-    return f"```\n{top}\n{board}\n{bot}\n```"
+    label = {1: "🥉 BRONZE", 2: "🥈 SILVER", 3: "🥇 GOLD"}[level]
+    return f"_{label}_\n*{_slot_board(s1, s2, s3)}*"
 
 
 def _bonus_outcome_text(kind: str, base_mult: int, bm: int, disp_sym: str,
@@ -472,7 +458,7 @@ async def cb_casino_spin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     try:
         for frame in _SPIN_FRAMES:
             await q.edit_message_text(
-                f"🎰 *Колесо крутится...*\n\n`{frame}`\n\n_Ставка: {_fmt(bet)} 💰_",
+                f"🎰 *Колесо крутится...*\n\n{frame}\n\n_Ставка: {_fmt(bet)} 💰_",
                 parse_mode="Markdown",
             )
             await asyncio.sleep(0.7)
@@ -615,7 +601,7 @@ async def cb_casino_slots_spin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
         for f1, f2, f3 in [(spin, spin, spin), (s1, spin, spin), (s1, s2, spin)]:
             await q.edit_message_text(
-                f"🎰 *СЛОТЫ*\n\n```\n{_slot_board(f1, f2, f3)}\n```\n\n_Ставка: {_fmt(bet)} 💰_",
+                f"🎰 *СЛОТЫ*\n\n*{_slot_board(f1, f2, f3)}*\n\n_Ставка: {_fmt(bet)} 💰_",
                 parse_mode="Markdown",
             )
             await asyncio.sleep(0.45)
@@ -686,14 +672,10 @@ async def cb_casino_bonus_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     await q.edit_message_text(
         f"🔥 *БОНУС-ИГРА* 🔥\n"
         f"_Потрачено: {_fmt(cost)} 💰 | Ставка: {_fmt(bet)} 💰/спин_\n\n"
-        f"```\n"
-        f"┌──────────────────────────┐\n"
-        f"│  🥉 Ур.1  {lvl1['spins']} спина  ×{lvl1['mult']}       │\n"
-        f"│  🥈 Ур.2  {lvl2['spins']} спина  ×{lvl2['mult']}  🔥Scatter │\n"
-        f"│  🥇 Финал {lvl3['spins']} спина  ×{lvl3['mult']}  🔥Scatter │\n"
-        f"│  ⚡ Гранд-Джекпот ⭐⭐⭐         │\n"
-        f"└──────────────────────────┘\n"
-        f"```\n"
+        f"🥉 Уровень 1 — {lvl1['spins']} спина, ×{lvl1['mult']}\n"
+        f"🥈 Уровень 2 — {lvl2['spins']} спина, ×{lvl2['mult']} + 🔥 Scatter\n"
+        f"🥇 Финал — {lvl3['spins']} спина, ×{lvl3['mult']} + 🔥 Scatter\n"
+        f"⚡ Гранд-Джекпот: ⭐⭐⭐\n\n"
         f"🌟 Wild — заменяет любой символ\n"
         f"🔥 Scatter — мгновенный апгрейд уровня",
         parse_mode="Markdown",
@@ -799,19 +781,11 @@ async def cb_casino_bonus_spin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
         else:
             if level == 3:
-                all_done  = "🥉✅ → 🥈✅ → 🥇✅"
-                total_box = (
-                    "```\n"
-                    "┌─────────────────────┐\n"
-                    f"│   💰 ИТОГО БОНУС:   │\n"
-                    f"│  {_fmt(total_won):^19} │\n"
-                    "│       монет         │\n"
-                    "└─────────────────────┘\n"
-                    "```"
-                )
+                all_done = "🥉✅ → 🥈✅ → 🥇✅"
                 text = (
                     f"🏆 *ГРАНД-ФИНАЛ ЗАВЕРШЁН!* 🏆\n\n"
-                    f"{all_done}\n\n{total_box}\n"
+                    f"{all_done}\n\n"
+                    f"💰 *Итого бонус: {_fmt(total_won)} монет*\n\n"
                     f"💼 Баланс: *{_fmt(new_balance)} 💰*"
                 )
             else:
