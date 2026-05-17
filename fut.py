@@ -3835,12 +3835,15 @@ async def cb_fut_draft(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "🎲 *FUT Драфт*\n\n"
         "Выбери режим:\n"
         "*Соло* — собери команду и сыграй 3 матча против бота.\n"
-        "*Мульти* — пригласи соперника, оба драфтите, потом матч.\n\n"
-        f"💰 Взнос: *{_fmt(DRAFT_ENTRY_FEE)}* монет",
+        "*Мульти* — пригласи соперника, оба драфтите, потом матч.\n"
+        "*Турнир* — 16 игроков, один драфт, 4 раунда до победителя.\n\n"
+        f"💰 Взнос соло/мульти: *{_fmt(DRAFT_ENTRY_FEE)}* монет\n"
+        f"💰 Взнос турнира: *{_fmt(TOUR_ENTRY_FEE)}* монет",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎯 Соло-драфт",  callback_data="fut_draft_solo"),
-             InlineKeyboardButton("⚔️ Мульти-драфт", callback_data="fut_draft_multi")],
+            [InlineKeyboardButton("🎯 Соло",   callback_data="fut_draft_solo"),
+             InlineKeyboardButton("⚔️ Мульти", callback_data="fut_draft_multi")],
+            [InlineKeyboardButton("🏆 Турнир (16 игроков)", callback_data="fut_tour")],
             [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")],
         ]),
     )
@@ -4564,6 +4567,852 @@ async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> N
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ТУРНИР-ДРАФТ — КОНСТАНТЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+TOUR_MAX_PLAYERS = 16
+TOUR_ENTRY_FEE   = 500   # монет
+TOUR_INVITE_PAGE = 8
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТУРНИР-ДРАФТ — ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _tour_id_from_data(data: str) -> str:
+    """Parse tour_id (e.g. 'DR-XXXX') from callback_data string.
+    Assumes tour_id is the 7-char segment right after the last relevant prefix.
+    Splits on '_' and finds the segment starting with 'DR-'."""
+    for part in data.split("_"):
+        if part.startswith("DR"):
+            # Reconstruct 'DR-XXXX': the '-' gets split too, so we need to
+            # handle both 'DR' + '-' + 'XXXX' and 'DR-XXXX' depending on data.
+            pass
+    # More reliable: find 'DR-' in the raw string and grab 7 chars
+    idx = data.find("DR-")
+    if idx >= 0:
+        return data[idx:idx + 7]
+    return ""
+
+
+def _tour_bracket_text(tour: dict) -> str:
+    slots   = tour.get("slots") or []
+    matches = tour.get("matches") or {}
+    lines   = []
+    round_labels = {1: "🔵 1/8 финала", 2: "🟢 Четвертьфинал", 3: "🟡 Полуфинал", 4: "🔴 Финал"}
+    for rnum in sorted(int(k) for k in matches if matches[k]):
+        label = round_labels.get(rnum, f"Раунд {rnum}")
+        lines.append(f"\n*{label}*")
+        for m in matches[str(rnum)]:
+            if m["p1"] < len(slots) and m["p2"] < len(slots):
+                n1 = slots[m["p1"]]["name"][:12]
+                n2 = slots[m["p2"]]["name"][:12]
+            else:
+                n1, n2 = "?", "?"
+            if m.get("winner") is not None and m["winner"] < len(slots):
+                wn = slots[m["winner"]]["name"][:12]
+                lines.append(f"  {n1} {m['s1']}:{m['s2']} {n2} → {wn} ✅")
+            else:
+                lines.append(f"  {n1} vs {n2}")
+    return "\n".join(lines) if lines else "_Матчи ещё не начались_"
+
+
+def _tour_lobby_text(tour: dict) -> str:
+    slots    = tour.get("slots") or []
+    tour_id  = tour["id"]
+    n        = len(slots)
+    lines    = [f"🏆 *Турнир {tour_id}*\n", f"Игроки ({n}/{TOUR_MAX_PLAYERS}):\n"]
+    for i, s in enumerate(slots, 1):
+        host_tag = " \\[Хост\\]" if i == 1 else ""
+        lines.append(f"{i}.{host_tag} {s['name']}")
+    for i in range(n + 1, TOUR_MAX_PLAYERS + 1):
+        lines.append(f"{i}. _(пусто)_")
+    return "\n".join(lines)
+
+
+async def _tour_run_round(tour_id: str, round_num: int, bot) -> None:
+    """Simulate all matches of the given round and advance/complete the tournament."""
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        return
+
+    slots   = tour["slots"]
+    matches = tour.get("matches") or {}
+    round_matches = matches.get(str(round_num), [])
+
+    results = []
+    for m in round_matches:
+        sa1 = slots[m["p1"]]["sa"]
+        sa2 = slots[m["p2"]]["sa"]
+        stats = _simulate_match(sa1, sa2)
+        s1 = stats["score_a"]
+        s2 = stats["score_b"]
+        if s1 > s2:
+            winner = m["p1"]
+        elif s2 > s1:
+            winner = m["p2"]
+        else:
+            winner = random.choice([m["p1"], m["p2"]])
+        results.append({**m, "winner": winner, "s1": s1, "s2": s2})
+
+    matches[str(round_num)] = results
+
+    human_slots = [s for s in slots if s.get("uid") and not s.get("is_bot")]
+    is_final = (len(results) == 1)
+
+    round_labels = {1: "1/8 финала", 2: "Четвертьфинал", 3: "Полуфинал", 4: "Финал"}
+    curr_label   = round_labels.get(round_num, f"Раунд {round_num}")
+
+    if is_final:
+        final_match  = results[0]
+        winner_idx   = final_match["winner"]
+        loser_idx    = final_match["p2"] if final_match["winner"] == final_match["p1"] else final_match["p1"]
+        winner_slot  = slots[winner_idx]
+        loser_slot   = slots[loser_idx]
+
+        n_humans     = sum(1 for s in slots if not s.get("is_bot"))
+        total_fee    = TOUR_ENTRY_FEE * n_humans
+        prize_1st    = round(total_fee * 0.65)
+        prize_2nd    = round(total_fee * 0.25)
+        prize_semi   = round(total_fee * 0.05)
+
+        if winner_slot.get("uid"):
+            db.add_coins(winner_slot["uid"], prize_1st)
+        if loser_slot.get("uid"):
+            db.add_coins(loser_slot["uid"], prize_2nd)
+
+        if round_num > 1:
+            semi_matches = matches.get(str(round_num - 1), [])
+            for sm in semi_matches:
+                loser_semi_idx = sm["p1"] if sm["winner"] == sm["p2"] else sm["p2"]
+                semi_slot = slots[loser_semi_idx]
+                if semi_slot.get("uid"):
+                    db.add_coins(semi_slot["uid"], prize_semi)
+
+        db.update_fut_tournament(tour_id, status="completed", matches=matches, round=round_num)
+
+        result_text = _tour_bracket_text({**tour, "matches": matches})
+        for s in human_slots:
+            try:
+                await bot.send_message(
+                    s["uid"],
+                    f"🏆 *Турнир {tour_id} завершён!*\n\n"
+                    f"🥇 Победитель: *{winner_slot['name']}* (+{_fmt(prize_1st)} 💰)\n"
+                    f"🥈 Финалист: *{loser_slot['name']}* (+{_fmt(prize_2nd)} 💰)\n\n"
+                    f"{result_text}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")
+                    ]]),
+                )
+            except Exception:
+                pass
+    else:
+        winners     = [m["winner"] for m in results]
+        next_round  = round_num + 1
+        next_matches = [
+            {"p1": winners[i], "p2": winners[i + 1], "winner": None, "s1": 0, "s2": 0}
+            for i in range(0, len(winners), 2)
+        ]
+        matches[str(next_round)] = next_matches
+        next_label = round_labels.get(next_round, f"Раунд {next_round}")
+
+        db.update_fut_tournament(tour_id, status=f"round_{next_round}", matches=matches, round=next_round)
+
+        round_text = []
+        for m in results:
+            n1 = slots[m["p1"]]["name"]
+            n2 = slots[m["p2"]]["name"]
+            wn = slots[m["winner"]]["name"]
+            round_text.append(f"• {n1} {m['s1']}:{m['s2']} {n2} → *{wn}* ✅")
+
+        for s in human_slots:
+            try:
+                await bot.send_message(
+                    s["uid"],
+                    f"⚽ *{curr_label} завершён!*\n\n"
+                    + "\n".join(round_text)
+                    + f"\n\n*{next_label}* уже начался!",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")
+                    ]]),
+                )
+            except Exception:
+                pass
+
+        await _tour_run_round(tour_id, next_round, bot)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТУРНИР-ДРАФТ — ХЕНДЛЕРЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_tour(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour$ — main tournament menu."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    tour = db.get_active_tournament_for_user(uid)
+    if tour:
+        slots    = tour.get("slots") or []
+        n        = len(slots)
+        status   = tour.get("status", "")
+        tour_id  = tour["id"]
+        is_host  = tour.get("host_uid") == uid
+
+        status_names = {
+            "lobby":    "🟡 Ожидание игроков",
+            "drafting": "🎲 Драфт",
+            "round_1":  "⚽ Раунд 1/8 финала",
+            "round_2":  "⚽ Четвертьфинал",
+            "round_3":  "⚽ Полуфинал",
+            "round_4":  "⚽ Финал",
+        }
+        status_str = status_names.get(status, status)
+
+        kb_rows = []
+        if status == "lobby":
+            if is_host:
+                kb_rows.append([
+                    InlineKeyboardButton("➕ Пригласить", callback_data=f"fut_tour_invite_{tour_id}_0"),
+                    InlineKeyboardButton("🚀 Начать!", callback_data=f"fut_tour_start_{tour_id}"),
+                ])
+            kb_rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"fut_tour_lobby_{tour_id}")])
+        elif status == "drafting":
+            # Check if this user has not yet drafted
+            my_slot = next((s for s in slots if s.get("uid") == uid), None)
+            if my_slot and not my_slot.get("drafted"):
+                kb_rows.append([InlineKeyboardButton("🎯 Задрафтить команду", callback_data=f"fut_tour_draft_{tour_id}")])
+            else:
+                kb_rows.append([InlineKeyboardButton("⏳ Ждём остальных...", callback_data=f"fut_tour_lobby_{tour_id}")])
+        else:
+            kb_rows.append([InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")])
+        kb_rows.append([InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")])
+
+        await q.edit_message_text(
+            f"🏆 *Турнир {tour_id}*\n\n"
+            f"Статус: {status_str}\n"
+            f"Игроки: *{n}/{TOUR_MAX_PLAYERS}*\n"
+            f"Взнос: *{_fmt(tour.get('entry_fee', TOUR_ENTRY_FEE))}* 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+        return
+
+    await q.edit_message_text(
+        "🏆 *Драфт-турнир*\n\n"
+        "Нет активного турнира.\n"
+        "_16 игроков, один драфт, четыре раунда!_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🆕 Создать турнир", callback_data="fut_tour_create"),
+             InlineKeyboardButton("◀ FUT меню",        callback_data="fut_menu")],
+        ]),
+    )
+
+
+async def cb_fut_tour_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_create$ — create new tournament lobby."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    existing = db.get_active_tournament_for_user(uid)
+    if existing:
+        await q.answer("У тебя уже есть активный турнир.", show_alert=True)
+        return
+
+    host_user = db.get_user(uid)
+    host_name = (host_user or {}).get("display_name") or (host_user or {}).get("username") or f"User{uid}"
+
+    tour_id = db.create_fut_tournament(uid, TOUR_ENTRY_FEE)
+
+    initial_slot = {"uid": uid, "name": host_name, "is_bot": False, "sa": None, "drafted": False}
+    db.update_fut_tournament(tour_id, slots=[initial_slot])
+
+    await q.edit_message_text(
+        f"🏆 *Турнир {tour_id}*\n\n"
+        f"Твой турнир создан!\n"
+        f"Код: `{tour_id}`\n\n"
+        f"Игроки (1/{TOUR_MAX_PLAYERS}):\n"
+        f"1. \\[Хост\\] {host_name}\n"
+        + "\n".join(f"{i}. _(пусто)_" for i in range(2, TOUR_MAX_PLAYERS + 1)),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Пригласить",    callback_data=f"fut_tour_invite_{tour_id}_0"),
+             InlineKeyboardButton("🚀 Начать!",       callback_data=f"fut_tour_start_{tour_id}")],
+            [InlineKeyboardButton("◀ Назад",          callback_data="fut_tour")],
+        ]),
+    )
+
+
+async def cb_fut_tour_lobby(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_lobby_(\w{7})$ — view/refresh lobby."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    tour_id = _tour_id_from_data(q.data)
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    slots   = tour.get("slots") or []
+    n       = len(slots)
+    is_host = tour.get("host_uid") == uid
+    status  = tour.get("status", "lobby")
+    in_tour = any(s.get("uid") == uid for s in slots)
+
+    text = _tour_lobby_text(tour)
+
+    kb_rows = []
+    if status == "lobby":
+        if is_host:
+            kb_rows.append([
+                InlineKeyboardButton("➕ Пригласить", callback_data=f"fut_tour_invite_{tour_id}_0"),
+                InlineKeyboardButton("🚀 Начать!",    callback_data=f"fut_tour_start_{tour_id}"),
+            ])
+        elif in_tour:
+            kb_rows.append([InlineKeyboardButton("🚪 Покинуть", callback_data=f"fut_tour_leave_{tour_id}")])
+        kb_rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"fut_tour_lobby_{tour_id}")])
+    else:
+        my_slot = next((s for s in slots if s.get("uid") == uid), None)
+        if status == "drafting" and my_slot and not my_slot.get("drafted"):
+            kb_rows.append([InlineKeyboardButton("🎯 Задрафтить", callback_data=f"fut_tour_draft_{tour_id}")])
+        else:
+            kb_rows.append([InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")])
+    kb_rows.append([InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")])
+
+    await q.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+    )
+
+
+async def cb_fut_tour_invite(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_invite_ — paginated player list for inviting.
+    callback_data format: fut_tour_invite_{tour_id}_{offset}
+    tour_id is 7 chars (DR-XXXX). offset is a number.
+    """
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+
+    # Parse: after prefix 'fut_tour_invite_' split remainder on '_' from right to get offset
+    tail    = q.data[len("fut_tour_invite_"):]
+    # tail = "DR-XXXX_0" or "DR-XXXX_10"
+    # Split on last '_'
+    ridx    = tail.rfind("_")
+    tour_id = tail[:ridx]    # "DR-XXXX"
+    offset  = int(tail[ridx + 1:])
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    if tour.get("host_uid") != uid:
+        await q.answer("Только хост может приглашать.", show_alert=True)
+        return
+
+    slots = tour.get("slots") or []
+    if len(slots) >= TOUR_MAX_PLAYERS:
+        await q.answer("Турнир уже заполнен.", show_alert=True)
+        return
+
+    existing_uids = {s["uid"] for s in slots if s.get("uid")}
+    all_users     = db.get_all_users(exclude_user_id=uid)
+    eligible      = [u for u in all_users if u["user_id"] not in existing_uids]
+
+    total      = len(eligible)
+    page_users = eligible[offset: offset + TOUR_INVITE_PAGE]
+
+    if not page_users and offset == 0:
+        await q.edit_message_text(
+            "Нет доступных игроков для приглашения.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data=f"fut_tour_lobby_{tour_id}")]
+            ]),
+        )
+        return
+
+    kb = []
+    for u in page_users:
+        name  = (u.get("display_name") or u.get("username") or f"User{u['user_id']}")[:20]
+        label = f"👤 {name}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"fut_tour_inv_{tour_id}_{u['user_id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_tour_invite_{tour_id}_{offset - TOUR_INVITE_PAGE}"))
+    if offset + TOUR_INVITE_PAGE < total:
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_tour_invite_{tour_id}_{offset + TOUR_INVITE_PAGE}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Назад", callback_data=f"fut_tour_lobby_{tour_id}")])
+
+    cur_page = offset // TOUR_INVITE_PAGE + 1
+    pages    = max(1, (total + TOUR_INVITE_PAGE - 1) // TOUR_INVITE_PAGE)
+    await q.edit_message_text(
+        f"➕ *Пригласить игрока*\n_Стр. {cur_page}/{pages} • Всего: {total}_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_tour_inv(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_inv_ — send invite DM to a specific player.
+    callback_data: fut_tour_inv_{tour_id}_{to_uid}
+    """
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+
+    tail    = q.data[len("fut_tour_inv_"):]
+    ridx    = tail.rfind("_")
+    tour_id = tail[:ridx]
+    to_uid  = int(tail[ridx + 1:])
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    if tour.get("host_uid") != uid:
+        await q.answer("Только хост может приглашать.", show_alert=True)
+        return
+
+    slots = tour.get("slots") or []
+    if len(slots) >= TOUR_MAX_PLAYERS:
+        await q.answer("Турнир заполнен!", show_alert=True)
+        return
+
+    if any(s.get("uid") == to_uid for s in slots):
+        await q.answer("Этот игрок уже в турнире.", show_alert=True)
+        return
+
+    host_user = db.get_user(uid)
+    host_name = (host_user or {}).get("display_name") or (host_user or {}).get("username") or f"User{uid}"
+
+    try:
+        await ctx.bot.send_message(
+            chat_id=to_uid,
+            text=(
+                f"🏆 *Тебя приглашают в турнир {tour_id}!*\n\n"
+                f"Организатор: *{host_name}*\n"
+                f"Взнос: *{_fmt(TOUR_ENTRY_FEE)}* 💰\n"
+                f"Игроков: *{len(slots)}/{TOUR_MAX_PLAYERS}*"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Вступить",   callback_data=f"fut_tour_join_{tour_id}"),
+                 InlineKeyboardButton("❌ Отклонить",  callback_data=f"fut_tour_rejt_{tour_id}")],
+            ]),
+        )
+    except Exception as e:
+        logger.warning(f"Tour invite DM failed for {to_uid}: {e}")
+        await q.answer("Не удалось отправить приглашение.", show_alert=True)
+        return
+
+    await q.answer(f"✅ Приглашение отправлено!")
+    await q.edit_message_text(
+        f"✅ Приглашение отправлено!\n\n"
+        f"Турнир: *{tour_id}* ({len(slots)}/{TOUR_MAX_PLAYERS})",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Ещё пригласить", callback_data=f"fut_tour_invite_{tour_id}_0")],
+            [InlineKeyboardButton("🔄 Лобби",          callback_data=f"fut_tour_lobby_{tour_id}")],
+        ]),
+    )
+
+
+async def cb_fut_tour_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_join_ — accept invite."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    tour_id = _tour_id_from_data(q.data)
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.edit_message_text(
+            "❌ Турнир не найден.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+        )
+        return
+
+    if tour.get("status") != "lobby":
+        await q.edit_message_text(
+            "❌ Турнир уже начался.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+        )
+        return
+
+    slots = list(tour.get("slots") or [])
+    if any(s.get("uid") == uid for s in slots):
+        await q.edit_message_text(
+            "Ты уже в турнире!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Лобби", callback_data=f"fut_tour_lobby_{tour_id}")]]),
+        )
+        return
+
+    if len(slots) >= TOUR_MAX_PLAYERS:
+        await q.edit_message_text(
+            "❌ Турнир уже заполнен.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+        )
+        return
+
+    entry_fee = tour.get("entry_fee", TOUR_ENTRY_FEE)
+    ok, new_bal = db.spend_coins(uid, entry_fee)
+    if not ok:
+        await q.edit_message_text(
+            f"❌ Недостаточно монет!\n\nНужно: *{_fmt(entry_fee)}* 💰\n"
+            f"Твой баланс: *{_fmt(new_bal)}* 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+        )
+        return
+
+    user = db.get_user(uid)
+    name = (user or {}).get("display_name") or (user or {}).get("username") or f"User{uid}"
+    slots.append({"uid": uid, "name": name, "is_bot": False, "sa": None, "drafted": False})
+    db.update_fut_tournament(tour_id, slots=slots)
+
+    # Notify host
+    host_uid = tour.get("host_uid")
+    try:
+        await ctx.bot.send_message(
+            chat_id=host_uid,
+            text=f"✅ *{name}* вступил в турнир *{tour_id}*! ({len(slots)}/{TOUR_MAX_PLAYERS})",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+    await q.edit_message_text(
+        f"✅ *Ты вступил в турнир {tour_id}!*\n\n"
+        f"Взнос: *{_fmt(entry_fee)}* 💰 списано.\n"
+        f"Игроков: *{len(slots)}/{TOUR_MAX_PLAYERS}*\n\n"
+        "_Жди старта от организатора._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Лобби", callback_data=f"fut_tour_lobby_{tour_id}")],
+            [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")],
+        ]),
+    )
+
+
+async def cb_fut_tour_rejt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_rejt_ — decline invite."""
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "Ты отклонил приглашение.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+    )
+
+
+async def cb_fut_tour_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_start_ — host starts tournament."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    tour_id = _tour_id_from_data(q.data)
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    if tour.get("host_uid") != uid:
+        await q.answer("Только хост может запустить турнир.", show_alert=True)
+        return
+
+    if tour.get("status") != "lobby":
+        await q.answer("Турнир уже начался.", show_alert=True)
+        return
+
+    slots = list(tour.get("slots") or [])
+    n_human = len(slots)
+
+    if n_human < 2:
+        await q.answer("Нужно минимум 2 игрока!", show_alert=True)
+        return
+
+    # Fill remaining slots with bots up to the nearest power of 2 (min 4)
+    import math
+    target = max(4, 2 ** math.ceil(math.log2(n_human)) if n_human > 1 else 4)
+    target = min(target, TOUR_MAX_PLAYERS)
+    bot_i  = 1
+    while len(slots) < target:
+        slots.append({
+            "uid":     None,
+            "name":    f"🤖 Бот #{bot_i}",
+            "is_bot":  True,
+            "sa":      _draft_bot_sa(82, 86),
+            "drafted": True,
+        })
+        bot_i += 1
+
+    # Shuffle draw
+    random.shuffle(slots)
+
+    # Generate Round 1 match pairs
+    round_1 = [
+        {"p1": i, "p2": i + 1, "winner": None, "s1": 0, "s2": 0}
+        for i in range(0, len(slots), 2)
+    ]
+    matches = {"1": round_1}
+
+    db.update_fut_tournament(tour_id, status="drafting", slots=slots, matches=matches, round=0)
+
+    # Notify all human players to draft
+    human_slots = [s for s in slots if s.get("uid") and not s.get("is_bot")]
+    for s in human_slots:
+        try:
+            await ctx.bot.send_message(
+                s["uid"],
+                f"🎲 *Турнир {tour_id} начался!*\n\n"
+                f"Задрафти команду — она будет твоей на весь турнир.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🎯 Начать драфт", callback_data=f"fut_tour_draft_{tour_id}")
+                ]]),
+            )
+        except Exception:
+            pass
+
+    await q.edit_message_text(
+        f"🚀 *Турнир {tour_id} запущен!*\n\n"
+        f"Участников: *{len(slots)}* ({n_human} человек + {len(slots) - n_human} ботов)\n\n"
+        "_Все участники получили уведомление — начинается драфт!_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 Начать драфт", callback_data=f"fut_tour_draft_{tour_id}")],
+        ]),
+    )
+
+
+async def cb_fut_tour_draft(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_draft_ — show formation picker for tournament draft."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    tour_id = _tour_id_from_data(q.data)
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    slots    = tour.get("slots") or []
+    my_slot  = next((s for s in slots if s.get("uid") == uid), None)
+    if not my_slot:
+        await q.answer("Ты не участник этого турнира.", show_alert=True)
+        return
+
+    if my_slot.get("drafted"):
+        await q.answer("Ты уже задрафтировал команду!", show_alert=True)
+        return
+
+    if tour.get("status") != "drafting":
+        await q.answer("Сейчас не фаза драфта.", show_alert=True)
+        return
+
+    items = [
+        InlineKeyboardButton(f["label"], callback_data=f"fut_tour_dform_{tour_id}_{key}")
+        for key, f in FORMATIONS.items()
+    ]
+    rows = [items[i:i + 2] for i in range(0, len(items), 2)]
+    rows.append([InlineKeyboardButton("◀ Отмена", callback_data=f"fut_tour_lobby_{tour_id}")])
+
+    await q.edit_message_text(
+        f"🎲 *Турнир {tour_id} — Драфт*\n\n"
+        "Выбери схему расстановки:\n"
+        "_Команда будет твоей на весь турнир!_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_fut_tour_dform(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_dform_ — formation chosen, begin tournament draft."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+
+    # Parse: fut_tour_dform_{tour_id}_{formation}
+    # tour_id is 7 chars (DR-XXXX), formation is e.g. '433', '442'
+    tail     = q.data[len("fut_tour_dform_"):]
+    # tour_id is always 7 chars
+    tour_id  = tail[:7]
+    form_key = tail[8:]   # skip the '_' separator
+
+    if form_key not in FORMATIONS:
+        await q.answer("Неизвестная схема.", show_alert=True)
+        return
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    slots   = tour.get("slots") or []
+    my_slot = next((s for s in slots if s.get("uid") == uid), None)
+    if not my_slot or my_slot.get("drafted"):
+        await q.answer("Нельзя драфтить.", show_alert=True)
+        return
+
+    slot_order = _draft_slot_order(form_key)
+    first_slot, first_group = slot_order[0]
+    options = _draft_get_options(first_group, set())
+
+    data: dict = {
+        "tour_id":         tour_id,
+        "formation":       form_key,
+        "slot_order":      [[s, g] for s, g in slot_order],
+        "slot_idx":        0,
+        "picks":           {},
+        "used_ids":        [p["id"] for p in options],
+        "current_options": options,
+    }
+    db.set_pending_action(uid, "fut_tour_draft", data)
+    await _show_tour_draft_pick(q, data)
+
+
+async def _show_tour_draft_pick(q, data: dict) -> None:
+    """Display current pick choice for a tournament draft slot."""
+    slot_order = data["slot_order"]
+    slot_idx   = data["slot_idx"]
+    slot_name, group = slot_order[slot_idx]
+    options    = data["current_options"]
+    total      = len(slot_order)
+    tour_id    = data["tour_id"]
+
+    group_name = GROUP_NAME.get(group, group)
+    text = (
+        f"🎲 *Турнир {tour_id} — Слот {slot_idx + 1}/{total}*\n\n"
+        f"📌 Позиция: `{slot_name}` ({group_name})\n\n"
+        "_Выбери одного из трёх:_"
+    )
+
+    kb = []
+    for p in options:
+        emoji = _card_emoji(p["rating"])
+        ver   = p.get("version", "")
+        ver_s = f" ({ver})" if ver else ""
+        lbl   = f"{emoji} {p['rating']} {p['position']} {p['name'][:16]}{ver_s}"
+        kb.append([InlineKeyboardButton(lbl, callback_data=f"fut_tour_pick_{p['id']}")])
+    kb.append([InlineKeyboardButton("❌ Отмена", callback_data=f"fut_tour_lobby_{tour_id}")])
+
+    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_tour_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_pick_ — pick card in tournament draft."""
+    q         = update.callback_query
+    await q.answer()
+    uid       = q.from_user.id
+    player_id = int(q.data[len("fut_tour_pick_"):])
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_tour_draft":
+        await q.answer("Сессия истекла. Начни заново.", show_alert=True)
+        return
+
+    data    = pending["data"]
+    options = data.get("current_options", [])
+    picked  = next((p for p in options if p["id"] == player_id), None)
+    if not picked:
+        await q.answer("Игрок не найден. Выбери из списка.", show_alert=True)
+        return
+
+    slot_order = data["slot_order"]
+    slot_idx   = data["slot_idx"]
+    slot_name  = slot_order[slot_idx][0]
+
+    data["picks"][slot_name] = picked
+    data["used_ids"].append(player_id)
+    data["slot_idx"] = slot_idx + 1
+
+    if data["slot_idx"] < len(slot_order):
+        next_slot, next_group = slot_order[data["slot_idx"]]
+        next_opts = _draft_get_options(next_group, set(data["used_ids"]))
+        data["current_options"] = next_opts
+        data["used_ids"].extend(p["id"] for p in next_opts)
+        db.set_pending_action(uid, "fut_tour_draft", data)
+        await _show_tour_draft_pick(q, data)
+        return
+
+    # All slots picked — build SA and save to tournament slot
+    tour_id = data["tour_id"]
+    sa      = _draft_build_sa(data["picks"])
+
+    db.clear_pending_action(uid)
+
+    # Reload tournament and update this player's slot
+    tour  = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.edit_message_text("❌ Турнир не найден.", parse_mode="Markdown")
+        return
+
+    slots = list(tour.get("slots") or [])
+    for s in slots:
+        if s.get("uid") == uid:
+            s["sa"]      = sa
+            s["drafted"] = True
+            break
+
+    db.update_fut_tournament(tour_id, slots=slots)
+
+    # Check if all human players have drafted
+    human_slots   = [s for s in slots if s.get("uid") and not s.get("is_bot")]
+    all_drafted   = all(s.get("drafted") for s in human_slots)
+
+    form_label = FORMATIONS[data["formation"]]["label"]
+    await q.edit_message_text(
+        f"✅ *Команда задрафтирована!* ({form_label})\n\n"
+        f"⭐ OVR: *{sa['ovr']}*  ATT: *{sa['att']}*  DEF: *{sa['def_']}*\n\n"
+        + ("_Все задрафтили — начинаем турнир!_" if all_drafted else "_Ждём остальных участников..._"),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")]
+        ]),
+    )
+
+    if all_drafted:
+        asyncio.create_task(_tour_run_round(tour_id, 1, ctx.bot))
+
+
+async def cb_fut_tour_bracket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_bracket_ — show bracket."""
+    q       = update.callback_query
+    await q.answer()
+    tour_id = _tour_id_from_data(q.data)
+
+    tour = db.get_fut_tournament(tour_id)
+    if not tour:
+        await q.answer("Турнир не найден.", show_alert=True)
+        return
+
+    text = _tour_bracket_text(tour)
+
+    await q.edit_message_text(
+        f"📊 *Сетка турнира {tour_id}*\n{text}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить", callback_data=f"fut_tour_bracket_{tour_id}")],
+            [InlineKeyboardButton("◀ FUT меню",  callback_data="fut_menu")],
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  REGISTRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -4623,6 +5472,19 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_trade_newp_",              cb_fut_trade_new_page), # пагинация списка
         ("^fut_trade_new$",               cb_fut_trade_new),
         ("^fut_trade$",                   cb_fut_trade),
+        # ── Турнир-Драфт (специфичные — до fut_tour$) ─────────────────────────
+        ("^fut_tour_pick_",               cb_fut_tour_pick),
+        ("^fut_tour_dform_",              cb_fut_tour_dform),
+        ("^fut_tour_draft_",              cb_fut_tour_draft),
+        ("^fut_tour_start_",              cb_fut_tour_start),
+        ("^fut_tour_rejt_",               cb_fut_tour_rejt),
+        ("^fut_tour_join_",               cb_fut_tour_join),
+        ("^fut_tour_inv_",                cb_fut_tour_inv),
+        ("^fut_tour_invite_",             cb_fut_tour_invite),
+        ("^fut_tour_bracket_",            cb_fut_tour_bracket),
+        ("^fut_tour_lobby_",              cb_fut_tour_lobby),
+        ("^fut_tour_create$",             cb_fut_tour_create),
+        ("^fut_tour$",                    cb_fut_tour),
         # ── Драфт ─────────────────────────────────────────────────────────────
         ("^fut_draft_multi_invp_",        cb_fut_draft_multi_invpage),
         ("^fut_draft_multi_inv_",         cb_fut_draft_multi_invite),

@@ -578,6 +578,57 @@ def cancel_trade_offer(offer_id: int, from_uid: int) -> bool:
     return bool(res.data)
 
 
+# ── FUT Tournaments ──────────────────────────────────────────────────────────
+
+def create_fut_tournament(host_uid: int, entry_fee: int) -> str:
+    """Create tournament lobby, return tour_id."""
+    import random
+    import string
+    from datetime import datetime, timezone
+    tour_id = "DR-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    get_client().table("fut_tournaments").insert({
+        "id": tour_id,
+        "host_uid": host_uid,
+        "entry_fee": entry_fee,
+        "status": "lobby",
+        "slots": [],
+        "matches": {},
+        "round": 0,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return tour_id
+
+
+def get_fut_tournament(tour_id: str) -> dict | None:
+    res = get_client().table("fut_tournaments").select("*").eq("id", tour_id).execute()
+    return res.data[0] if res.data else None
+
+
+def update_fut_tournament(tour_id: str, **fields) -> None:
+    get_client().table("fut_tournaments").update(fields).eq("id", tour_id).execute()
+
+
+def get_active_tournament_for_user(uid: int) -> dict | None:
+    """Return a non-completed tournament where uid is host or in slots."""
+    res = (
+        get_client().table("fut_tournaments")
+        .select("*").eq("host_uid", uid)
+        .neq("status", "completed")
+        .order("created_at", desc=True).limit(1).execute()
+    )
+    if res.data:
+        return res.data[0]
+    res2 = (
+        get_client().table("fut_tournaments")
+        .select("*").neq("status", "completed").execute()
+    )
+    for t in (res2.data or []):
+        slots = t.get("slots") or []
+        if any(s.get("uid") == uid for s in slots):
+            return t
+    return None
+
+
 def apply_elo_result(
     user_a: dict,
     user_b: dict,
