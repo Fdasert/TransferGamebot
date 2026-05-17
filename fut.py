@@ -1857,28 +1857,28 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         },
     }
 
-    # Анимация для accepter (редактируем его сообщение)
-    await _run_match_animation(
-        bot=ctx.bot,
-        chat_id=accepter_id,
-        message_id=q.message.message_id,
-        my_name=my_name,
-        opp_name=ch_name,
-        stats=stats_ac,
-        r_delta=delta_ac,
-        coins=coins_ac,
-    )
-
-    # Анимация для challenger (новое сообщение)
-    await _run_match_animation(
-        bot=ctx.bot,
-        chat_id=challenger_id,
-        message_id=None,
-        my_name=ch_name,
-        opp_name=my_name,
-        stats=match_stats,
-        r_delta=delta_ch,
-        coins=coins_ch,
+    # Анимация для обоих игроков одновременно
+    await asyncio.gather(
+        _run_match_animation(
+            bot=ctx.bot,
+            chat_id=accepter_id,
+            message_id=q.message.message_id,
+            my_name=my_name,
+            opp_name=ch_name,
+            stats=stats_ac,
+            r_delta=delta_ac,
+            coins=coins_ac,
+        ),
+        _run_match_animation(
+            bot=ctx.bot,
+            chat_id=challenger_id,
+            message_id=None,
+            my_name=ch_name,
+            opp_name=my_name,
+            stats=match_stats,
+            r_delta=delta_ch,
+            coins=coins_ch,
+        ),
     )
 
 
