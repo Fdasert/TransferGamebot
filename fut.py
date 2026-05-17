@@ -2992,20 +2992,93 @@ async def cb_fut_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cb_fut_trade_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """^fut_trade_new$"""
-    q   = update.callback_query
+    """^fut_trade_new$  — redirect to page 0"""
+    q = update.callback_query
     await q.answer()
-    uid = q.from_user.id
+    await _show_trade_player_list(q, q.from_user.id, offset=0)
 
-    db.set_pending_action(uid, "fut_trade_who", {})
+
+async def cb_fut_trade_new_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_newp_(\d+)$"""
+    q      = update.callback_query
+    await q.answer()
+    offset = int(q.data[len("fut_trade_newp_"):])
+    await _show_trade_player_list(q, q.from_user.id, offset=offset)
+
+
+async def _show_trade_player_list(q, uid: int, offset: int) -> None:
+    """Показывает пагинированный список игроков для выбора получателя трейда."""
+    all_users = db.get_all_users(exclude_user_id=uid)
+    # Только те у кого есть хотя бы одна карточка в клубе
+    eligible = []
+    for u in all_users:
+        if u["user_id"] == uid:
+            continue
+        eligible.append(u)
+
+    PAGE = 8
+    total      = len(eligible)
+    page_users = eligible[offset: offset + PAGE]
+
+    if not page_users:
+        await q.edit_message_text(
+            "🤝 *Новое предложение*\n\n_Нет других игроков._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_trade")]
+            ]),
+        )
+        return
+
+    kb = []
+    for u in page_users:
+        name  = (u.get("display_name") or u.get("username") or f"User{u['user_id']}")[:20]
+        label = f"👤 {name}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"fut_trade_target_{u['user_id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_trade_newp_{offset - PAGE}"))
+    if offset + PAGE < total:
+        nav.append(InlineKeyboardButton("Вперёд ▶", callback_data=f"fut_trade_newp_{offset + PAGE}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Отмена", callback_data="fut_trade")])
+
+    cur_page = offset // PAGE + 1
+    pages    = (total + PAGE - 1) // PAGE
     await q.edit_message_text(
-        "🤝 *Новое предложение*\n\n"
-        "Введи @username или ID игрока, которому хочешь предложить сделку:",
+        f"🤝 *Новое предложение*\n_Выбери игрока ({cur_page}/{pages}):_",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Отмена", callback_data="fut_trade")]
-        ]),
+        reply_markup=InlineKeyboardMarkup(kb),
     )
+
+
+async def cb_fut_trade_target(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_target_(\d+)$  — игрок выбран, начинаем билдер"""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    to_uid = int(q.data[len("fut_trade_target_"):])
+
+    if to_uid == uid:
+        await q.answer("Нельзя отправить предложение самому себе.", show_alert=True)
+        return
+
+    target = db.get_user(to_uid)
+    if not target:
+        await q.answer("Игрок не найден.", show_alert=True)
+        return
+
+    to_name = target.get("display_name") or target.get("username") or f"User{to_uid}"
+    build_data = {
+        "to_uid":         to_uid,
+        "to_name":        to_name,
+        "offer_club_ids": [],
+        "offer_coins":    0,
+    }
+    db.set_pending_action(uid, "fut_trade_build", build_data)
+    await _show_trade_builder(uid, build_data, q, ctx)
 
 
 async def cb_fut_trade_addcard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3477,49 +3550,6 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
         )
         return True
 
-    # ── Ввод получателя предложения ───────────────────────────────────────────
-    if action == "fut_trade_who":
-        # Пробуем как int (user_id) или @username
-        target_user = None
-        if text.lstrip("@").isdigit():
-            target_user = db.get_user(int(text.lstrip("@")))
-        else:
-            target_user = db.get_user_by_username(text)
-
-        if not target_user:
-            await update.message.reply_text(
-                "❌ Игрок не найден. Попробуй ввести @username или числовой ID."
-            )
-            return True
-
-        to_uid  = target_user["user_id"]
-        to_name = target_user.get("display_name") or target_user.get("username") or f"User{to_uid}"
-
-        if to_uid == uid:
-            await update.message.reply_text("❌ Нельзя отправить предложение самому себе.")
-            return True
-
-        build_data = {
-            "to_uid":         to_uid,
-            "to_name":        to_name,
-            "offer_club_ids": [],
-            "offer_coins":    0,
-        }
-        db.set_pending_action(uid, "fut_trade_build", build_data)
-
-        # Отправляем построитель через reply-сообщение
-        await update.message.reply_text(
-            f"🤝 *Новое предложение → {to_name}*\n\n"
-            f"Ты предлагаешь:\n• Нет карточек\n• 0 💰",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Добавить карточку", callback_data="fut_trade_addcard_0"),
-                 InlineKeyboardButton("💰 Монеты",            callback_data="fut_trade_setcoins")],
-                [InlineKeyboardButton("❌ Отмена",             callback_data="fut_trade_cancel_build")],
-            ]),
-        )
-        return True
-
     # ── Ввод монет для предложения ────────────────────────────────────────────
     if action == "fut_trade_coins":
         build_data = pending.get("data", {})
@@ -3631,6 +3661,8 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_trade_view_",              cb_fut_trade_view),
         ("^fut_trade_inbox$",             cb_fut_trade_inbox),
         ("^fut_trade_outbox$",            cb_fut_trade_outbox),
+        ("^fut_trade_target_",            cb_fut_trade_target),   # выбор игрока → билдер
+        ("^fut_trade_newp_",              cb_fut_trade_new_page), # пагинация списка
         ("^fut_trade_new$",               cb_fut_trade_new),
         ("^fut_trade$",                   cb_fut_trade),
     ]
