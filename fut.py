@@ -499,8 +499,8 @@ def _sell_duplicates(user_id: int) -> tuple[int, int]:
             seen.add(pid)
     if not to_delete:
         return 0, 0
-    for cid in to_delete:
-        db.get_client().table("user_club").delete().eq("id", cid).execute()
+    # BUG-29: batch DELETE instead of N+1 individual calls
+    db.get_client().table("user_club").delete().in_("id", to_delete).execute()
     earned = len(to_delete) * 50
     db.add_coins(user_id, earned)
     return len(to_delete), earned
@@ -3132,13 +3132,8 @@ async def cb_fut_trade_new_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 
 async def _show_trade_player_list(q, uid: int, offset: int) -> None:
     """Показывает пагинированный список игроков для выбора получателя трейда."""
-    all_users = db.get_all_users(exclude_user_id=uid)
-    # Только те у кого есть хотя бы одна карточка в клубе
-    eligible = []
-    for u in all_users:
-        if u["user_id"] == uid:
-            continue
-        eligible.append(u)
+    # BUG-33: get_all_users already excludes uid — redundant inner filter removed
+    eligible = db.get_all_users(exclude_user_id=uid)
 
     PAGE = 8
     total      = len(eligible)
@@ -3340,10 +3335,10 @@ async def cb_fut_trade_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         await q.answer("Предложение пустое — добавь карточки или монеты.", show_alert=True)
         return
 
-    # Проверяем баланс если в предложении есть монеты
+    # BUG-27: escrow coins at send time so recipient can't be misled
     if offer_coins > 0:
-        balance = db.get_coins(uid)
-        if balance < offer_coins:
+        ok, _ = db.spend_coins(uid, offer_coins)
+        if not ok:
             await q.answer("Недостаточно монет.", show_alert=True)
             return
 
@@ -3498,15 +3493,21 @@ async def cb_fut_trade_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     offer_ids = offer.get("offer_club_ids") or []
     coins     = offer.get("offer_coins", 0)
 
-    # Проверяем баланс у отправителя
-    if coins > 0:
-        ok, _ = db.spend_coins(from_uid, coins)
-        if not ok:
+    # BUG-26: verify cards still belong to from_uid before transferring
+    if offer_ids:
+        res = db.get_client().table("user_club").select("id, user_id").in_("id", offer_ids).execute()
+        owned = {row["id"] for row in (res.data or []) if row["user_id"] == from_uid}
+        invalid = [cid for cid in offer_ids if cid not in owned]
+        if invalid:
+            db.mark_trade_offer_accepted(offer_id, uid)  # close the offer so it can't be retried
             await q.edit_message_text(
-                "❌ У отправителя недостаточно монет для сделки.",
+                "❌ Сделка невозможна: часть карточек была продана или передана отправителем.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Назад", callback_data="fut_trade")]]),
             )
             return
+
+    # BUG-27: coins were escrowed (deducted) at send time — just credit accepter
+    if coins > 0:
         db.add_coins(uid, coins)
 
     # Переносим карточки от from_uid → uid
@@ -3542,7 +3543,12 @@ async def cb_fut_trade_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     uid      = q.from_user.id
     offer_id = int(q.data[len("fut_trade_decline_"):])
 
+    # BUG-27: refund escrowed coins to sender on decline
+    offer = db.get_trade_offer(offer_id)
     ok = db.decline_trade_offer(offer_id, uid)
+    if ok and offer and offer.get("offer_coins", 0) > 0:
+        db.add_coins(offer["from_uid"], offer["offer_coins"])
+
     msg = "✅ Предложение отклонено." if ok else "❌ Не удалось отклонить предложение."
 
     await q.edit_message_text(
@@ -3603,7 +3609,12 @@ async def cb_fut_trade_cancel_offer(update: Update, ctx: ContextTypes.DEFAULT_TY
     uid      = q.from_user.id
     offer_id = int(q.data[len("fut_trade_cancel_"):])
 
-    ok  = db.cancel_trade_offer(offer_id, uid)
+    # BUG-27: refund escrowed coins back to sender on cancel
+    offer = db.get_trade_offer(offer_id)
+    ok = db.cancel_trade_offer(offer_id, uid)
+    if ok and offer and offer.get("offer_coins", 0) > 0:
+        db.add_coins(uid, offer["offer_coins"])
+
     msg = "✅ Предложение отменено." if ok else "❌ Не удалось отменить."
 
     await q.edit_message_text(
@@ -4233,6 +4244,9 @@ async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         return
 
     data = pending["data"]
+    # BUG-8: clear FIRST so a double-tap won't find the session anymore
+    db.clear_pending_action(uid)
+
     wins = data.get("wins", 0)
     coins_reward, get_pack = DRAFT_REWARDS.get(wins, (0, False))
 
@@ -4255,8 +4269,6 @@ async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             for c in pack_cards:
                 emoji = _card_emoji(c["rating"])
                 pack_lines.append(f"  {emoji} {c['rating']} {c['position']} {c['name']}")
-
-    db.clear_pending_action(uid)
 
     log_lines = []
     for i, m in enumerate(data.get("match_log", [])):
@@ -4286,8 +4298,7 @@ async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
 async def _show_draft_multi_player_list(q, uid: int, offset: int) -> None:
     """Paginated player list for multi-draft invite."""
-    all_users  = db.get_all_users(exclude_user_id=uid)
-    eligible   = [u for u in all_users if u["user_id"] != uid]
+    eligible   = db.get_all_users(exclude_user_id=uid)  # BUG-33: already excludes uid
     PAGE       = 8
     total      = len(eligible)
     page_users = eligible[offset: offset + PAGE]
@@ -4498,11 +4509,14 @@ async def cb_fut_draft_multi_decline(update: Update, ctx: ContextTypes.DEFAULT_T
     db.add_coins(host_uid, DRAFT_ENTRY_FEE)
     db.clear_pending_action(host_uid)
 
-    # Notify host
+    # BUG-22: notify host WITH a back button so they're not stuck on the dead formation picker
     try:
         await ctx.bot.send_message(
             chat_id=host_uid,
-            text="❌ Соперник отклонил приглашение в драфт.",
+            text="❌ Соперник отклонил приглашение в драфт.\n\n💰 Взнос возвращён.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu"),
+            ]]),
         )
     except Exception as e:
         logger.warning(f"Draft decline notify failed: {e}")
@@ -4617,6 +4631,11 @@ async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> N
         return
     if not room["host_sa"] or not room["guest_sa"]:
         return
+    # BUG-1 fix: atomic guard against double-execution (asyncio is single-threaded,
+    # so setting the flag here is safe before any await)
+    if room.get("started"):
+        return
+    room["started"] = True
 
     host_uid   = room["host_uid"]
     guest_uid  = room["guest_uid"]
@@ -4638,7 +4657,7 @@ async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> N
     elif score_g > score_h:
         coins_h, coins_g = 0, pot + bonus
     else:
-        coins_h = coins_g = DRAFT_ENTRY_FEE
+        coins_h = coins_g = pot // 2  # BUG-7: return from actual pot, not full fee
 
     if coins_h > 0:
         db.add_coins(host_uid, coins_h)
@@ -4731,14 +4750,8 @@ TOUR_INVITE_PAGE = 8
 
 def _tour_id_from_data(data: str) -> str:
     """Parse tour_id (e.g. 'DR-XXXX') from callback_data string.
-    Assumes tour_id is the 7-char segment right after the last relevant prefix.
-    Splits on '_' and finds the segment starting with 'DR-'."""
-    for part in data.split("_"):
-        if part.startswith("DR"):
-            # Reconstruct 'DR-XXXX': the '-' gets split too, so we need to
-            # handle both 'DR' + '-' + 'XXXX' and 'DR-XXXX' depending on data.
-            pass
-    # More reliable: find 'DR-' in the raw string and grab 7 chars
+    Tour IDs are always 7 chars and start with 'DR-'."""
+    # BUG-13: removed dead for-loop that did nothing; just scan for the prefix
     idx = data.find("DR-")
     if idx >= 0:
         return data[idx:idx + 7]
@@ -4814,8 +4827,8 @@ async def _tour_run_round(tour_id: str, round_num: int, bot) -> None:
         # Build animations for human players
         uid1 = slot1.get("uid")  # None if bot slot
         uid2 = slot2.get("uid")
-        is_bot1 = slot1.get("is_bot", True)
-        is_bot2 = slot2.get("is_bot", True)
+        is_bot1 = slot1.get("is_bot", False)  # BUG-19: default False — missing key = human
+        is_bot2 = slot2.get("is_bot", False)
         name1 = slot1["name"]
         name2 = slot2["name"]
         match_key = f"tour_{tour_id}_r{round_num}_m{m_idx}"
@@ -4941,7 +4954,9 @@ async def _tour_run_round(tour_id: str, round_num: int, bot) -> None:
         if loser_slot.get("uid"):
             db.add_coins(loser_slot["uid"], prize_2nd)
 
-        if round_num > 1:
+        # BUG-20: prize_semi only for actual semi-final losers (round >= 3 means
+        # there were 8+ players and round_num-1 is genuinely a semi-final round)
+        if round_num >= 3:
             semi_matches = matches.get(str(round_num - 1), [])
             for sm in semi_matches:
                 loser_semi_idx = sm["p1"] if sm["winner"] == sm["p2"] else sm["p2"]
@@ -5649,6 +5664,43 @@ async def cb_fut_tour_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         asyncio.create_task(_tour_run_round(tour_id, 1, ctx.bot))
 
 
+async def cb_fut_tour_leave(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_tour_leave_ — leave tournament lobby (only allowed before start)."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    tour_id = _tour_id_from_data(q.data)
+
+    tour = db.get_fut_tournament(tour_id) if tour_id else None
+    if not tour or tour.get("status") != "lobby":
+        await q.edit_message_text(
+            "❌ Покинуть турнир можно только до старта.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+        )
+        return
+
+    slots = tour.get("slots") or []
+    # Host cannot leave (they must cancel the tournament instead)
+    if tour.get("host_uid") == uid:
+        await q.answer("Хост не может покинуть — только отменить турнир.", show_alert=True)
+        return
+
+    new_slots = [s for s in slots if s.get("uid") != uid]
+    if len(new_slots) == len(slots):
+        await q.answer("Ты не в этом турнире.", show_alert=True)
+        return
+
+    # Refund entry fee and remove from slot list
+    db.add_coins(uid, TOUR_ENTRY_FEE)
+    db.update_fut_tournament(tour_id, slots=new_slots)
+
+    await q.edit_message_text(
+        f"✅ Ты покинул турнир {tour_id}.\n💰 Взнос {_fmt(TOUR_ENTRY_FEE)} монет возвращён.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]),
+    )
+
+
 async def cb_fut_tour_bracket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """^fut_tour_bracket_ — show bracket."""
     q       = update.callback_query
@@ -5741,6 +5793,7 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_tour_join_",               cb_fut_tour_join),
         ("^fut_tour_inv_",                cb_fut_tour_inv),
         ("^fut_tour_invite_",             cb_fut_tour_invite),
+        ("^fut_tour_leave_",              cb_fut_tour_leave),
         ("^fut_tour_bracket_",            cb_fut_tour_bracket),
         ("^fut_tour_lobby_",              cb_fut_tour_lobby),
         ("^fut_tour_create$",             cb_fut_tour_create),
