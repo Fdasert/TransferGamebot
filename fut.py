@@ -705,7 +705,8 @@ async def cb_fut_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📦 Открыть пак", callback_data="fut_packs"),
              InlineKeyboardButton("🏟 Мой клуб",    callback_data="fut_club_0_od")],
-            [InlineKeyboardButton("🧩 Команда",     callback_data="fut_team")],
+            [InlineKeyboardButton("🧩 Команда",     callback_data="fut_team"),
+             InlineKeyboardButton("⚔️ Матчи",       callback_data="fut_match")],
             [InlineKeyboardButton("◀ В меню",       callback_data="menu_back")],
         ]),
     )
@@ -1167,6 +1168,651 @@ async def cb_fut_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  МАТЧИ — КОНСТАНТЫ И DB
+# ══════════════════════════════════════════════════════════════════════════════
+
+MATCH_WIN_COINS   = 500
+MATCH_DRAW_COINS  = 200
+MATCH_LOSS_COINS  = 50
+MATCH_K_FACTOR    = 40
+MATCH_MIN_PLACED  = 5   # минимум расставленных игроков для матча
+
+
+def _get_fut_rating(user_id: int) -> int:
+    u = db.get_user(user_id)
+    return (u or {}).get("fut_rating", 1000) or 1000
+
+
+def _set_fut_rating(user_id: int, new_rating: int) -> None:
+    db.get_client().table("users").update({"fut_rating": max(100, new_rating)}).eq("user_id", user_id).execute()
+
+
+def _save_fut_match(p1: int, p2: int, s1: int, s2: int,
+                    r1b: int, r2b: int, r1c: int, r2c: int) -> None:
+    db.get_client().table("fut_matches").insert({
+        "player1_id": p1, "player2_id": p2,
+        "score1": s1, "score2": s2,
+        "r1_before": r1b, "r2_before": r2b,
+        "r1_change": r1c, "r2_change": r2c,
+    }).execute()
+
+
+def _get_opponents(my_uid: int) -> list[dict]:
+    """Пользователи у которых есть команда (кроме себя), отсортированные по fut_rating."""
+    teams = db.get_client().table("fut_team").select("user_id, slots").execute().data or []
+    eligible = []
+    for t in teams:
+        uid = t["user_id"]
+        if uid == my_uid:
+            continue
+        slots = t.get("slots") or {}
+        placed = sum(1 for v in slots.values() if v is not None)
+        if placed < MATCH_MIN_PLACED:
+            continue
+        u = db.get_user(uid)
+        if not u:
+            continue
+        eligible.append({
+            "user_id":   uid,
+            "name":      u.get("display_name") or u.get("username") or f"User{uid}",
+            "username":  u.get("username") or "",
+            "fut_rating": (u.get("fut_rating") or 1000),
+            "placed":    placed,
+        })
+    return sorted(eligible, key=lambda x: -x["fut_rating"])
+
+
+def _get_match_history(user_id: int, limit: int = 5) -> list[dict]:
+    res = (
+        db.get_client()
+        .table("fut_matches")
+        .select("*")
+        .or_(f"player1_id.eq.{user_id},player2_id.eq.{user_id}")
+        .order("played_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    return res.data or []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  МАТЧИ — РАСЧЁТ И СИМУЛЯЦИЯ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _team_cards_placed(user_id: int) -> list[dict]:
+    """Карточки только расставленных в команде позиций."""
+    team = _get_team(user_id)
+    if not team:
+        return []
+    slots = team.get("slots") or {}
+    club_ids = {int(v) for v in slots.values() if v is not None}
+    if not club_ids:
+        return []
+    all_cards = _get_club_all(user_id)
+    return [c for c in all_cards if c["club_id"] in club_ids]
+
+
+def _calc_strength(user_id: int) -> dict:
+    """
+    Возвращает {att, def_, ovr, chem, placed}.
+    att  = средний (PAC+SHO+DRI)/3 для ATT+MID позиций + химия-бонус
+    def_ = средний (DEF+PHY)/2    для DEF+GK позиций  + химия-бонус
+    """
+    team = _get_team(user_id)
+    if not team:
+        return {"att": 70, "def_": 70, "ovr": 70, "chem": 0, "placed": 0}
+
+    formation = team.get("formation", "433")
+    form = FORMATIONS.get(formation, FORMATIONS["433"])
+    slots = team.get("slots") or {}
+    all_cards = _get_club_all(user_id)
+    by_id = {c["club_id"]: c for c in all_cards}
+
+    att_vals, def_vals, gk_vals = [], [], []
+    placed_cards = []
+
+    for slot_name, group in form["slots"].items():
+        club_id = slots.get(slot_name)
+        if club_id is None:
+            continue
+        card = by_id.get(int(club_id))
+        if card is None:
+            continue
+        placed_cards.append(card)
+        if group in ("ATT", "MID"):
+            att_vals.append((card["pac"] + card["sho"] + card["dri"]) / 3)
+        if group in ("DEF", "MID"):
+            def_vals.append((card["def"] + card["phy"]) / 2)
+        if group == "GK":
+            gk_vals.append((card["def"] + card["phy"] + card["pas"]) / 3)
+
+    chem = _team_chemistry(placed_cards)
+    bonus = 1 + (chem / 100) * 0.12  # до +12% за 100% химию
+
+    att  = round((sum(att_vals) / max(len(att_vals), 1)) * bonus) if att_vals else 70
+    def_ = round(((sum(def_vals) / max(len(def_vals), 1)) * 0.7 +
+                  (sum(gk_vals)  / max(len(gk_vals),  1)) * 0.3) * bonus) if def_vals or gk_vals else 70
+    ovr  = _team_ovr(placed_cards)
+
+    return {"att": att, "def_": def_, "ovr": ovr, "chem": chem, "placed": len(placed_cards)}
+
+
+def _simulate_match(sa: dict, sb: dict) -> tuple[int, int, list[str]]:
+    """
+    Симулирует 6 игровых отрезков (по 15 мин).
+    Шанс гола команды A за отрезок = BASE * att_A / (att_A + def_B).
+    """
+    BASE = 0.40   # базовый шанс гола за 15 мин (≈2.4 гола в среднем)
+    score_a, score_b = 0, 0
+    events: list[str] = []
+
+    minutes = [15, 30, 45, 60, 75, 90]
+    for minute in minutes:
+        total_ab = sa["att"] + sb["def_"]
+        if total_ab > 0 and random.random() < BASE * (sa["att"] / total_ab):
+            score_a += 1
+            events.append(f"⚽ {minute}'")
+
+        total_ba = sb["att"] + sa["def_"]
+        if total_ba > 0 and random.random() < BASE * (sb["att"] / total_ba):
+            score_b += 1
+            events.append(f"⚽ {minute}' (соп)")
+
+    return score_a, score_b, events
+
+
+def _elo_delta(ra: int, rb: int, result: float) -> int:
+    """result: 1 = победа, 0.5 = ничья, 0 = поражение."""
+    exp = 1 / (1 + 10 ** ((rb - ra) / 400))
+    return round(MATCH_K_FACTOR * (result - exp))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  МАТЧИ — ФОРМАТИРОВАНИЕ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _match_preview_text(my_name: str, opp_name: str, sa: dict, sb: dict,
+                        my_rating: int, opp_rating: int) -> str:
+    return (
+        f"⚔️ *Матч*\n\n"
+        f"🔵 *{my_name}*\n"
+        f"   OVR {sa['ovr']}  •  ATT {sa['att']}  •  DEF {sa['def_']}  •  "
+        f"Хим {sa['chem']}%  •  ⭐ {my_rating}\n\n"
+        f"🔴 *{opp_name}*\n"
+        f"   OVR {sb['ovr']}  •  ATT {sb['att']}  •  DEF {sb['def_']}  •  "
+        f"Хим {sb['chem']}%  •  ⭐ {opp_rating}\n"
+    )
+
+
+def _match_result_text(my_name: str, opp_name: str,
+                       score_a: int, score_b: int,
+                       r_delta_a: int, coins_a: int) -> str:
+    if score_a > score_b:
+        header = f"🏆 *ПОБЕДА!*  {score_a}:{score_b}"
+    elif score_a == score_b:
+        header = f"🤝 *Ничья*  {score_a}:{score_b}"
+    else:
+        header = f"💀 *Поражение*  {score_a}:{score_b}"
+
+    r_str = f"+{r_delta_a}" if r_delta_a >= 0 else str(r_delta_a)
+    c_str = f"+{coins_a}"
+
+    return (
+        f"{header}\n\n"
+        f"🔵 *{my_name}*  vs  🔴 *{opp_name}*\n\n"
+        f"📊 Рейтинг:  *{r_str}* ⭐\n"
+        f"💰 Монеты:   *{c_str}* 💰\n"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  МАТЧИ — АНИМАЦИЯ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _run_match_animation(
+    bot, chat_id: int, message_id: int | None,
+    my_name: str, opp_name: str,
+    sa: dict, sb: dict,
+    score_a: int, score_b: int,
+    r_delta: int, coins: int,
+    back_data: str = "fut_match",
+) -> None:
+    """Анимирует матч в чате chat_id (редактирует message_id или шлёт новое)."""
+
+    async def _edit(text: str, kb=None):
+        try:
+            if message_id:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=message_id,
+                    text=text, parse_mode="Markdown",
+                    reply_markup=kb,
+                )
+            else:
+                await bot.send_message(
+                    chat_id=chat_id, text=text,
+                    parse_mode="Markdown", reply_markup=kb,
+                )
+        except Exception:
+            pass
+
+    # 1. Стартовый экран
+    await _edit(
+        f"⚽ *Матч начинается!*\n\n"
+        f"🔵 {my_name}  vs  🔴 {opp_name}\n\n"
+        f"_Стадион заполняется..._"
+    )
+    await asyncio.sleep(1.5)
+
+    # 2. 1-й тайм
+    await _edit(
+        f"⚽ *1-й тайм*\n\n"
+        f"🔵 {my_name}  *?*  :  *?*  🔴 {opp_name}\n\n"
+        f"🏃 Команды выходят на поле..."
+    )
+    await asyncio.sleep(1.8)
+
+    # Имитируем ход 1-го тайма
+    s_a_half = score_a // 2 + (score_a % 2 if random.random() > 0.5 else 0)
+    s_b_half = score_b // 2 + (score_b % 2 if random.random() > 0.5 else 0)
+    s_a_half = min(s_a_half, score_a)
+    s_b_half = min(s_b_half, score_b)
+
+    await _edit(
+        f"⚽ *Перерыв — 45'*\n\n"
+        f"🔵 {my_name}  *{s_a_half}*  :  *{s_b_half}*  🔴 {opp_name}\n\n"
+        f"_Команды уходят в раздевалку..._"
+    )
+    await asyncio.sleep(2.0)
+
+    # 3. 2-й тайм — нагнетание
+    tension = ""
+    if score_a != score_b:
+        leading = my_name if score_a > score_b else opp_name
+        tension = f"_{leading} ведёт, соперник давит!_"
+    else:
+        tension = "_Равная борьба, всё решится сейчас!_"
+
+    await _edit(
+        f"⚽ *2-й тайм*\n\n"
+        f"🔵 {my_name}  *{s_a_half}*  :  *{s_b_half}*  🔴 {opp_name}\n\n"
+        f"{tension}"
+    )
+    await asyncio.sleep(1.8)
+
+    # Момент — если итог отличается от полутайма
+    if score_a != s_a_half or score_b != s_b_half:
+        await _edit(
+            f"🔥 *Горячие моменты!*\n\n"
+            f"🔵 {my_name}  *{s_a_half}*  :  *{s_b_half}*  🔴 {opp_name}\n\n"
+            f"_⚡ Решающие минуты!_"
+        )
+        await asyncio.sleep(1.5)
+
+    # 4. Финальный результат
+    r_str = f"+{r_delta}" if r_delta >= 0 else str(r_delta)
+    c_str = f"+{coins}"
+
+    if score_a > score_b:
+        result_hdr = f"🏆 *ПОБЕДА!*"
+        emoji_row  = "🥇🎉🏆"
+    elif score_a == score_b:
+        result_hdr = f"🤝 *Ничья*"
+        emoji_row  = "🤝"
+    else:
+        result_hdr = f"💀 *Поражение*"
+        emoji_row  = "😤 Реванш!"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚔️ Ещё матч",   callback_data="fut_match"),
+         InlineKeyboardButton("🏟 Команда",    callback_data="fut_team")],
+        [InlineKeyboardButton("◀ FUT меню",    callback_data="fut_menu")],
+    ])
+
+    await _edit(
+        f"{result_hdr}  {emoji_row}\n\n"
+        f"🔵 *{my_name}*   *{score_a}* : *{score_b}*   🔴 *{opp_name}*\n\n"
+        f"📊 Рейтинг:  *{r_str}* ⭐\n"
+        f"💰 Монеты:   *{c_str}* 💰\n",
+        kb=kb,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  МАТЧИ — ХЕНДЛЕРЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Главное меню матчей. fut_match"""
+    q   = update.callback_query
+    uid = q.from_user.id
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    sa = _calc_strength(uid)
+    if sa["placed"] < MATCH_MIN_PLACED:
+        await q.edit_message_text(
+            f"⚔️ *Матчи*\n\n"
+            f"Для игры нужно расставить минимум *{MATCH_MIN_PLACED} игроков* в команде.\n"
+            f"Сейчас расставлено: *{sa['placed']}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏟 Собрать команду", callback_data="fut_team")],
+                [InlineKeyboardButton("◀ FUT меню",        callback_data="fut_menu")],
+            ]),
+        )
+        return
+
+    opponents = _get_opponents(uid)
+    my_rating = _get_fut_rating(uid)
+
+    lines = [
+        f"⚔️ *Матчи*\n",
+        f"Твоя команда: OVR *{sa['ovr']}* | ATT *{sa['att']}* | DEF *{sa['def_']}* | "
+        f"Хим *{sa['chem']}%* | ⭐ *{my_rating}*\n",
+    ]
+
+    if not opponents:
+        lines.append("_Пока нет соперников с командой. Позови друзей!_")
+        kb = [[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]
+    else:
+        lines.append("*Выбери соперника:*")
+        kb_rows = []
+        for opp in opponents[:8]:
+            label = f"⭐{opp['fut_rating']}  {opp['name'][:18]}"
+            kb_rows.append([InlineKeyboardButton(label, callback_data=f"fut_challenge_{opp['user_id']}")])
+        kb_rows.append([
+            InlineKeyboardButton("📋 История",  callback_data="fut_match_history"),
+            InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu"),
+        ])
+        kb = kb_rows
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_challenge(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Предпросмотр матча + подтверждение. fut_challenge_{opp_uid}"""
+    q      = update.callback_query
+    uid    = q.from_user.id
+    opp_id = int(q.data[len("fut_challenge_"):])
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    opp_user = db.get_user(opp_id)
+    if not opp_user:
+        await q.answer("Игрок не найден.", show_alert=True); return
+
+    sa = _calc_strength(uid)
+    sb = _calc_strength(opp_id)
+    my_rating  = _get_fut_rating(uid)
+    opp_rating = _get_fut_rating(opp_id)
+    my_name    = q.from_user.first_name or "Ты"
+    opp_name   = opp_user.get("display_name") or opp_user.get("username") or f"User{opp_id}"
+
+    await q.edit_message_text(
+        _match_preview_text(my_name, opp_name, sa, sb, my_rating, opp_rating) +
+        "\nОтправить вызов?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Вызвать!", callback_data=f"fut_send_{opp_id}")],
+            [InlineKeyboardButton("◀ Назад",    callback_data="fut_match")],
+        ]),
+    )
+
+
+async def cb_fut_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправляет вызов сопернику. fut_send_{opp_uid}"""
+    q      = update.callback_query
+    uid    = q.from_user.id
+    opp_id = int(q.data[len("fut_send_"):])
+    try:
+        await q.answer("Вызов отправлен! ✅")
+    except Exception:
+        pass
+
+    # Проверяем нет ли уже ожидающего вызова
+    existing = db.get_pending_action(opp_id)
+    if existing and existing.get("action") == "fut_challenge":
+        await q.edit_message_text(
+            "⏳ У этого игрока уже есть входящий вызов. Попробуй позже.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_match")]
+            ]),
+        )
+        return
+
+    opp_user = db.get_user(opp_id)
+    my_name  = q.from_user.first_name or "Игрок"
+    opp_name = (opp_user or {}).get("display_name") or f"User{opp_id}"
+
+    sa = _calc_strength(uid)
+    my_rating = _get_fut_rating(uid)
+
+    # Сохраняем вызов в pending_actions для соперника
+    db.set_pending_action(opp_id, "fut_challenge", {
+        "challenger_id":   uid,
+        "challenger_name": my_name,
+        "challenger_rating": my_rating,
+        "challenger_ovr":  sa["ovr"],
+        "challenger_att":  sa["att"],
+        "challenger_def":  sa["def_"],
+        "challenger_chem": sa["chem"],
+    })
+
+    # Уведомление сопернику
+    try:
+        await ctx.bot.send_message(
+            chat_id=opp_id,
+            text=(
+                f"⚔️ *Входящий вызов!*\n\n"
+                f"🔴 *{my_name}* вызывает тебя на матч!\n\n"
+                f"   OVR *{sa['ovr']}*  •  ATT *{sa['att']}*  •  DEF *{sa['def_']}*  "
+                f"•  ⭐ *{my_rating}*"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Принять",  callback_data=f"fut_accept_{uid}"),
+                 InlineKeyboardButton("❌ Отклонить", callback_data=f"fut_decline_{uid}")],
+            ]),
+        )
+    except Exception as e:
+        logger.warning(f"Не смог отправить вызов {opp_id}: {e}")
+
+    await q.edit_message_text(
+        f"✅ Вызов отправлен *{opp_name}*!\n\n"
+        f"_Ждём ответа..._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+        ]),
+    )
+
+
+async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Принять вызов и сыграть матч. fut_accept_{challenger_uid}"""
+    q             = update.callback_query
+    accepter_id   = q.from_user.id
+    challenger_id = int(q.data[len("fut_accept_"):])
+    try:
+        await q.answer("Матч начинается! ⚽")
+    except Exception:
+        pass
+
+    # Данные вызова
+    pending = db.get_pending_action(accepter_id)
+    if not pending or pending.get("action") != "fut_challenge":
+        await q.edit_message_text(
+            "⏳ Вызов устарел или уже принят.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+            ]),
+        )
+        return
+
+    db.clear_pending_action(accepter_id)
+    data = pending.get("data", {})
+
+    # Имена
+    ch_name  = data.get("challenger_name", f"User{challenger_id}")
+    my_name  = q.from_user.first_name or "Соперник"
+
+    # Силы команд
+    sa = {  # challenger (тот кто вызвал)
+        "att":  data.get("challenger_att",  70),
+        "def_": data.get("challenger_def",  70),
+        "ovr":  data.get("challenger_ovr",  70),
+        "chem": data.get("challenger_chem", 0),
+    }
+    sb = _calc_strength(accepter_id)  # accepter
+
+    # Рейтинги
+    ra = data.get("challenger_rating", 1000)
+    rb = _get_fut_rating(accepter_id)
+
+    # Симуляция
+    score_ch, score_ac, _ = _simulate_match(sa, sb)
+
+    # ELO и монеты для challenger
+    if score_ch > score_ac:
+        result_ch, result_ac = 1.0, 0.0
+        coins_ch, coins_ac = MATCH_WIN_COINS, MATCH_LOSS_COINS
+    elif score_ch == score_ac:
+        result_ch = result_ac = 0.5
+        coins_ch = coins_ac = MATCH_DRAW_COINS
+    else:
+        result_ch, result_ac = 0.0, 1.0
+        coins_ch, coins_ac = MATCH_LOSS_COINS, MATCH_WIN_COINS
+
+    delta_ch = _elo_delta(ra, rb, result_ch)
+    delta_ac = _elo_delta(rb, ra, result_ac)
+
+    # Обновляем рейтинг и монеты
+    _set_fut_rating(challenger_id, ra + delta_ch)
+    _set_fut_rating(accepter_id,   rb + delta_ac)
+    db.add_coins(challenger_id, coins_ch)
+    db.add_coins(accepter_id,   coins_ac)
+
+    # Сохраняем матч
+    _save_fut_match(challenger_id, accepter_id, score_ch, score_ac,
+                    ra, rb, delta_ch, delta_ac)
+
+    # Анимация для accepter (редактируем его сообщение)
+    await _run_match_animation(
+        bot=ctx.bot,
+        chat_id=accepter_id,
+        message_id=q.message.message_id,
+        my_name=my_name,
+        opp_name=ch_name,
+        sa=sb,  # accepter — "мои" данные
+        sb=sa,
+        score_a=score_ac,
+        score_b=score_ch,
+        r_delta=delta_ac,
+        coins=coins_ac,
+    )
+
+    # Анимация для challenger (новое сообщение)
+    await _run_match_animation(
+        bot=ctx.bot,
+        chat_id=challenger_id,
+        message_id=None,  # шлём новое сообщение
+        my_name=ch_name,
+        opp_name=my_name,
+        sa=sa,
+        sb=sb,
+        score_a=score_ch,
+        score_b=score_ac,
+        r_delta=delta_ch,
+        coins=coins_ch,
+    )
+
+
+async def cb_fut_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отклонить вызов. fut_decline_{challenger_uid}"""
+    q             = update.callback_query
+    accepter_id   = q.from_user.id
+    challenger_id = int(q.data[len("fut_decline_"):])
+    try:
+        await q.answer("Вызов отклонён.")
+    except Exception:
+        pass
+
+    db.clear_pending_action(accepter_id)
+    my_name = q.from_user.first_name or "Соперник"
+
+    await q.edit_message_text(
+        "❌ Вызов отклонён.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+        ]),
+    )
+
+    # Уведомляем challenger
+    try:
+        await ctx.bot.send_message(
+            chat_id=challenger_id,
+            text=f"❌ *{my_name}* отклонил твой вызов.",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+
+async def cb_fut_match_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """История матчей. fut_match_history"""
+    q   = update.callback_query
+    uid = q.from_user.id
+    try:
+        await q.answer()
+    except Exception:
+        pass
+
+    matches = _get_match_history(uid, limit=10)
+    if not matches:
+        await q.edit_message_text(
+            "📋 *История матчей*\n\n_Матчей пока нет._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_match")]
+            ]),
+        )
+        return
+
+    my_rating = _get_fut_rating(uid)
+    lines = [f"📋 *История матчей*  ⭐ {my_rating}\n"]
+    for m in matches:
+        is_p1   = m["player1_id"] == uid
+        s_me    = m["score1"] if is_p1 else m["score2"]
+        s_opp   = m["score2"] if is_p1 else m["score1"]
+        delta   = m["r1_change"] if is_p1 else m["r2_change"]
+        opp_id  = m["player2_id"] if is_p1 else m["player1_id"]
+        opp_u   = db.get_user(opp_id)
+        opp_n   = (opp_u or {}).get("display_name") or f"User{opp_id}"
+
+        if s_me > s_opp:    icon = "🏆"
+        elif s_me == s_opp: icon = "🤝"
+        else:                icon = "💀"
+
+        d_str = f"+{delta}" if delta >= 0 else str(delta)
+        lines.append(f"{icon} {s_me}:{s_opp}  vs *{opp_n[:14]}*  ({d_str} ⭐)")
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ Назад", callback_data="fut_match")]
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  REGISTRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1189,4 +1835,11 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_team_pick_",       cb_fut_team_pick),
         ("^fut_team_form$",       cb_fut_team_form),
         ("^fut_team$",            cb_fut_team),
+        # Матчи (специфичные — до общего fut_match)
+        ("^fut_challenge_",       cb_fut_challenge),
+        ("^fut_send_",            cb_fut_send),
+        ("^fut_accept_",          cb_fut_accept),
+        ("^fut_decline_",         cb_fut_decline),
+        ("^fut_match_history$",   cb_fut_match_history),
+        ("^fut_match$",           cb_fut_match),
     ]
