@@ -44,23 +44,23 @@ logger = logging.getLogger(__name__)
 PACKS: dict[str, dict] = {
     "bronze": {
         "name": "🥉 Бронзовый пак", "cost": 1_500,  "cards": 3,
-        "min_rating": 82, "max_rating": 84, "guaranteed": None,
-        "desc": "3 карты • OVR 82–84",
+        "min_rating": 87, "max_rating": 87, "guaranteed": None,
+        "desc": "3 карты • OVR 87",
     },
     "silver": {
         "name": "🥈 Серебряный пак", "cost": 4_000,  "cards": 3,
-        "min_rating": 85, "max_rating": 87, "guaranteed": None,
-        "desc": "3 карты • OVR 85–87",
+        "min_rating": 88, "max_rating": 89, "guaranteed": None,
+        "desc": "3 карты • OVR 88–89",
     },
     "gold": {
         "name": "🥇 Золотой пак",    "cost": 12_000, "cards": 3,
-        "min_rating": 88, "max_rating": 91, "guaranteed": None,
-        "desc": "3 карты • OVR 88–91",
+        "min_rating": 90, "max_rating": 91, "guaranteed": None,
+        "desc": "3 карты • OVR 90–91",
     },
     "elite": {
         "name": "💎 Элитный пак",    "cost": 30_000, "cards": 3,
-        "min_rating": 92, "max_rating": 97, "guaranteed": None,
-        "desc": "3 карты • OVR 92–97",
+        "min_rating": 92, "max_rating": 95, "guaranteed": None,
+        "desc": "3 карты • OVR 92–95",
     },
     "mega": {
         "name": "⚡ Мега пак",       "cost": 60_000, "cards": 5,
@@ -70,8 +70,7 @@ PACKS: dict[str, dict] = {
 }
 
 RATING_WEIGHTS: dict[int, float] = {
-    82: 65.0, 83: 25.0, 84: 10.0,
-    85: 60.0, 86: 28.0, 87: 12.0,
+    87: 40.0,
     88: 50.0, 89: 28.0, 90: 15.0, 91:  7.0,
     92: 38.0, 93: 28.0, 94: 18.0, 95:  9.0, 96: 5.0, 97: 2.0,
 }
@@ -144,6 +143,67 @@ FORMATIONS: dict[str, dict] = {
         },
         "rows": [["ST1", "ST2"], ["CM1", "CM2", "CM3"], ["LB", "CB1", "CB2", "CB3", "RB"], ["GK"]],
     },
+    "41212": {
+        "label": "4-1-2-1-2 ◆",
+        "slots": {
+            "GK": "GK",
+            "LB": "DEF", "CB1": "DEF", "CB2": "DEF", "RB": "DEF",
+            "CDM": "MID", "LM": "MID", "RM": "MID", "CAM": "MID",
+            "ST1": "ATT", "ST2": "ATT",
+        },
+        "rows": [["ST1", "ST2"], ["CAM"], ["LM", "RM"], ["CDM"], ["LB", "CB1", "CB2", "RB"], ["GK"]],
+    },
+    "4321": {
+        "label": "4-3-2-1 🎄",
+        "slots": {
+            "GK": "GK",
+            "LB": "DEF", "CB1": "DEF", "CB2": "DEF", "RB": "DEF",
+            "CM1": "MID", "CM2": "MID", "CM3": "MID",
+            "LAM": "ATT", "RAM": "ATT", "ST": "ATT",
+        },
+        "rows": [["ST"], ["LAM", "RAM"], ["CM1", "CM2", "CM3"], ["LB", "CB1", "CB2", "RB"], ["GK"]],
+    },
+    "343": {
+        "label": "3-4-3",
+        "slots": {
+            "GK": "GK",
+            "CB1": "DEF", "CB2": "DEF", "CB3": "DEF",
+            "LM": "MID", "CM1": "MID", "CM2": "MID", "RM": "MID",
+            "LW": "ATT", "ST": "ATT", "RW": "ATT",
+        },
+        "rows": [["LW", "ST", "RW"], ["LM", "CM1", "CM2", "RM"], ["CB1", "CB2", "CB3"], ["GK"]],
+    },
+    "451": {
+        "label": "4-5-1",
+        "slots": {
+            "GK": "GK",
+            "LB": "DEF", "CB1": "DEF", "CB2": "DEF", "RB": "DEF",
+            "LM": "MID", "CM1": "MID", "CM2": "MID", "CM3": "MID", "RM": "MID",
+            "ST": "ATT",
+        },
+        "rows": [["ST"], ["LM", "CM1", "CM2", "CM3", "RM"], ["LB", "CB1", "CB2", "RB"], ["GK"]],
+    },
+    "4141": {
+        "label": "4-1-4-1",
+        "slots": {
+            "GK": "GK",
+            "LB": "DEF", "CB1": "DEF", "CB2": "DEF", "RB": "DEF",
+            "CDM": "MID",
+            "LM": "MID", "CM1": "MID", "CM2": "MID", "RM": "MID",
+            "ST": "ATT",
+        },
+        "rows": [["ST"], ["LM", "CM1", "CM2", "RM"], ["CDM"], ["LB", "CB1", "CB2", "RB"], ["GK"]],
+    },
+    "541": {
+        "label": "5-4-1",
+        "slots": {
+            "GK": "GK",
+            "LB": "DEF", "CB1": "DEF", "CB2": "DEF", "CB3": "DEF", "RB": "DEF",
+            "LM": "MID", "CM1": "MID", "CM2": "MID", "RM": "MID",
+            "ST": "ATT",
+        },
+        "rows": [["ST"], ["LM", "CM1", "CM2", "RM"], ["LB", "CB1", "CB2", "CB3", "RB"], ["GK"]],
+    },
 }
 
 # Короткий ярлык слота (для пустых кнопок)
@@ -152,7 +212,8 @@ SLOT_LABEL: dict[str, str] = {
     "CB1": "CB", "CB2": "CB", "CB3": "CB",
     "LM": "LM", "RM": "RM",
     "CM1": "CM", "CM2": "CM", "CM3": "CM",
-    "CDM1": "CDM", "CDM2": "CDM", "CAM": "CAM",
+    "CDM": "CDM", "CDM1": "CDM", "CDM2": "CDM",
+    "CAM": "CAM", "LAM": "CAM", "RAM": "CAM",
     "LW": "LW", "RW": "RW",
     "ST": "ST", "ST1": "ST", "ST2": "ST",
 }
@@ -182,6 +243,40 @@ _POS_ORDER: dict[str, int] = {
     "CDM": 3, "CM": 3, "CAM": 3, "LM": 3, "RM": 3,
     "LW": 4, "RW": 4, "LF": 4, "RF": 4, "CF": 4, "ST": 4, "SS": 4,
 }
+
+# Флаги наций (полный список из БД)
+NATION_FLAGS: dict[str, str] = {
+    "Albania": "🇦🇱", "Algeria": "🇩🇿", "Argentina": "🇦🇷",
+    "Armenia": "🇦🇲", "Australia": "🇦🇺", "Austria": "🇦🇹",
+    "Belgium": "🇧🇪", "Bolivia": "🇧🇴", "Bosnia and Herzegovina": "🇧🇦",
+    "Brazil": "🇧🇷", "Bulgaria": "🇧🇬", "Burkina Faso": "🇧🇫",
+    "Cameroon": "🇨🇲", "Canada": "🇨🇦", "Cape Verde Islands": "🇨🇻",
+    "Chile": "🇨🇱", "Colombia": "🇨🇴", "Congo DR": "🇨🇩",
+    "Côte d'Ivoire": "🇨🇮", "Croatia": "🇭🇷", "Czechia": "🇨🇿",
+    "Denmark": "🇩🇰", "Ecuador": "🇪🇨", "Egypt": "🇪🇬",
+    "England": "🏴󠁧󠁢󠁥󠁮󠁧󁿢", "Finland": "🇫🇮", "France": "🇫🇷",
+    "Gabon": "🇬🇦", "Georgia": "🇬🇪", "Germany": "🇩🇪",
+    "Ghana": "🇬🇭", "Greece": "🇬🇷", "Guinea": "🇬🇳",
+    "Haiti": "🇭🇹", "Honduras": "🇭🇳", "Hungary": "🇭🇺",
+    "Iceland": "🇮🇸", "Italy": "🇮🇹", "Jamaica": "🇯🇲",
+    "Japan": "🇯🇵", "Jordan": "🇯🇴", "Korea Republic": "🇰🇷",
+    "Kosovo": "🇽🇰", "Malawi": "🇲🇼", "Mali": "🇲🇱",
+    "Mexico": "🇲🇽", "Montenegro": "🇲🇪", "Morocco": "🇲🇦",
+    "Netherlands": "🇳🇱", "New Zealand": "🇳🇿", "Nigeria": "🇳🇬",
+    "Northern Ireland": "🇬🇧", "Norway": "🇳🇴", "Paraguay": "🇵🇾",
+    "Peru": "🇵🇪", "Poland": "🇵🇱", "Portugal": "🇵🇹",
+    "Republic of Ireland": "🇮🇪", "Romania": "🇷🇴", "Russia": "🇷🇺",
+    "Saudi Arabia": "🇸🇦", "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󁿢", "Senegal": "🇸🇳",
+    "Serbia": "🇷🇸", "Sierra Leone": "🇸🇱", "Slovakia": "🇸🇰",
+    "Slovenia": "🇸🇮", "South Africa": "🇿🇦", "Spain": "🇪🇸",
+    "Suriname": "🇸🇷", "Sweden": "🇸🇪", "Switzerland": "🇨🇭",
+    "Türkiye": "🇹🇷", "Ukraine": "🇺🇦", "United States": "🇺🇸",
+    "Uruguay": "🇺🇾", "Uzbekistan": "🇺🇿", "Wales": "🏴󠁧󠁢󠁷󠁬󠁳󁿢",
+}
+
+
+def _flag(nation: str) -> str:
+    return NATION_FLAGS.get(nation, "🌍")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,7 +557,7 @@ def _card_detail_text(p: dict) -> str:
         f"{rar}   OVR *{p['rating']}*\n"
         f"{ver_line}\n"
         f"{_pos_icon(p['position'])}  *{p['name'].upper()}*\n"
-        f"`{p['position']}`  •  {p['nation']}  •  {p['club']}\n\n"
+        f"`{p['position']}`  •  {_flag(p['nation'])} {p['nation']}  •  {p['club']}\n\n"
         f"📊 *Характеристики*\n"
         f"`PAC` *{p['pac']:>2}*  {_stat_bar(p['pac'])}\n"
         f"`SHO` *{p['sho']:>2}*  {_stat_bar(p['sho'])}\n"
@@ -831,11 +926,13 @@ async def cb_fut_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     team = _get_team(uid)
     if not team:
-        # Нет команды — сразу выбор схемы
-        rows = [
-            [InlineKeyboardButton(f["label"], callback_data=f"fut_team_setform_{key}")]
+        # Нет команды — сразу выбор схемы в 2 столбца
+        items = [
+            InlineKeyboardButton(f["label"], callback_data=f"fut_team_setform_{key}")
             for key, f in FORMATIONS.items()
-        ] + [[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]]
+        ]
+        rows = [items[i:i+2] for i in range(0, len(items), 2)]
+        rows.append([InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")])
         await q.edit_message_text(
             "🧩 *СБОРКА КОМАНДЫ*\n\nУ тебя ещё нет команды.\nВыбери схему расстановки:",
             parse_mode="Markdown",
@@ -879,10 +976,13 @@ async def cb_fut_team_form(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     q = update.callback_query
     await q.answer()
 
-    rows = [
-        [InlineKeyboardButton(f["label"], callback_data=f"fut_team_setform_{key}")]
+    # Показываем схемы в два столбца
+    items = [
+        InlineKeyboardButton(f["label"], callback_data=f"fut_team_setform_{key}")
         for key, f in FORMATIONS.items()
-    ] + [[InlineKeyboardButton("◀ Назад", callback_data="fut_team")]]
+    ]
+    rows = [items[i:i+2] for i in range(0, len(items), 2)]
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data="fut_team")])
 
     await q.edit_message_text(
         "🔄 *СХЕМА РАССТАНОВКИ*\n\nВыбери схему:\n_Текущий состав будет сброшен_",
@@ -993,7 +1093,7 @@ async def cb_fut_team_slot(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         )])
     for c in page_cards:
         rar = _rarity_short(c["rating"], c["version"])
-        lbl = f"{_pos_icon(c['position'])} {c['name'][:18]}  {rar} {c['rating']}"
+        lbl = f"{_pos_icon(c['position'])} {c['name'][:15]}  {_flag(c['nation'])}  {rar}{c['rating']}"
         card_btns.append([
             InlineKeyboardButton(lbl, callback_data=f"fut_team_pick_{slot}_{c['club_id']}")
         ])
