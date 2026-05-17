@@ -1820,20 +1820,22 @@ async def _run_match_animation(
             "1v1":      [("⚡ Выйти навстречу", "attack"), ("🧤 Держать ворота", "stay")],
             "freekick": [("⬆️ Прыгнуть вверх", "up"), ("⬇️ Прыгнуть вниз", "down")],
         }
+        # Тексты-подсказки — форма глагола зависит от того, «Ты» или имя
+        _is_you = (my_name == "Ты")
         ATT_BASE = {
             "penalty":  (
                 f"🟡 *{minute}'* — *ПЕНАЛЬТИ!*\n\n"
-                f"💥 *{my_name}* выходит к точке!\n"
+                f"💥 *{my_name}* {'выходишь' if _is_you else 'выходит'} к точке!\n"
                 f"Судья свистит... Куда бьёшь?"
             ),
             "1v1":      (
                 f"🔥 *{minute}'* — *ОДИН НА ОДИН!*\n\n"
-                f"⚡ *{my_name}* врывается в штрафную!\n"
+                f"⚡ *{my_name}* {'врываешься' if _is_you else 'врывается'} в штрафную!\n"
                 f"Только вратарь на пути. Что делаешь?"
             ),
             "freekick": (
                 f"⚡ *{minute}'* — *ШТРАФНОЙ!*\n\n"
-                f"🎯 *{my_name}* разбегается!\n"
+                f"🎯 *{my_name}* {'разбегаешься' if _is_you else 'разбегается'}!\n"
                 f"Стенка выстроена. Куда бьёшь?"
             ),
         }
@@ -1841,17 +1843,17 @@ async def _run_match_animation(
             "penalty":  (
                 f"🟡 *{minute}'* — *Пенальти против тебя!*\n\n"
                 f"😰 *{opp_name}* идёт к точке!\n"
-                f"Куда прыгает твой вратарь?"
+                f"Куда {'прыгаешь' if _is_you else 'прыгает'} твой вратарь?"
             ),
             "1v1":      (
                 f"🔥 *{minute}'* — *Один на один!*\n\n"
                 f"😤 *{opp_name}* выходит один на один с твоим вратарём!\n"
-                f"Что делает вратарь?"
+                f"Что {'делаешь' if _is_you else 'делает'} вратарь?"
             ),
             "freekick": (
                 f"⚡ *{minute}'* — *Штрафной против тебя!*\n\n"
                 f"😬 *{opp_name}* готовится к удару!\n"
-                f"Куда прыгает твой вратарь?"
+                f"Куда {'прыгаешь' if _is_you else 'прыгает'} твой вратарь?"
             ),
         }
 
@@ -1900,22 +1902,43 @@ async def _run_match_animation(
             goal = random.random() < max(0.05, min(0.90, base_p + edge))
 
         # ── Человекочитаемые описания выборов ────────────────────────────────
-        ATT_LABELS = {
-            "left":    "бьёт *влево* ↖️", "center": "бьёт *в центр* ⬆️",
+        # 3-е лицо (для имён) и 2-е лицо (для «Ты»)
+        ATT_3 = {
+            "left":    "бьёт *влево* ↖️",   "center": "бьёт *в центр* ⬆️",
             "right":   "бьёт *вправо* ↗️",
-            "shot":    "наносит *удар* ⚽", "dribble": "идёт *в обводку* 🎯",
+            "shot":    "наносит *удар* ⚽",   "dribble": "идёт *в обводку* 🎯",
             "top":     "целит *в верхний угол* ⬆️",
             "bottom":  "целит *в нижний угол* ⬇️",
         }
-        KPR_LABELS = {
-            "left":    "прыгает *влево* ↖️", "center": "остаётся *в центре* ⬆️",
+        ATT_2 = {
+            "left":    "бьёшь *влево* ↖️",  "center": "бьёшь *в центр* ⬆️",
+            "right":   "бьёшь *вправо* ↗️",
+            "shot":    "наносишь *удар* ⚽",  "dribble": "идёшь *в обводку* 🎯",
+            "top":     "целишь *в верхний угол* ⬆️",
+            "bottom":  "целишь *в нижний угол* ⬇️",
+        }
+        KPR_3 = {
+            "left":    "прыгает *влево* ↖️",  "center": "остаётся *в центре* ⬆️",
             "right":   "прыгает *вправо* ↗️",
             "attack":  "выходит *навстречу* ⚡", "stay": "держит *позицию* 🧤",
-            "up":      "прыгает *вверх* ⬆️", "down": "прыгает *вниз* ⬇️",
+            "up":      "прыгает *вверх* ⬆️",   "down": "прыгает *вниз* ⬇️",
         }
-        att_lbl  = ATT_LABELS.get(att_c, att_c)
-        kpr_lbl  = KPR_LABELS.get(kpr_c, kpr_c)
+        KPR_2 = {
+            "left":    "прыгаешь *влево* ↖️", "center": "остаёшься *в центре* ⬆️",
+            "right":   "прыгаешь *вправо* ↗️",
+            "attack":  "выходишь *навстречу* ⚡", "stay": "держишь *позицию* 🧤",
+            "up":      "прыгаешь *вверх* ⬆️",  "down": "прыгаешь *вниз* ⬇️",
+        }
+
         auto_tag = " _(авто)_" if auto else ""
+
+        # Для строки «что произошло» — выбираем нужный падеж
+        if is_attacker:
+            att_lbl = (ATT_2 if my_name == "Ты" else ATT_3).get(att_c, att_c)
+            kpr_lbl = KPR_3.get(kpr_c, kpr_c)   # вратарь — всегда соперник (3-е л.)
+        else:
+            att_lbl = ATT_3.get(att_c, att_c)    # атакует соперник (3-е л.)
+            kpr_lbl = (KPR_2 if my_name == "Ты" else KPR_3).get(kpr_c, kpr_c)
 
         # Одинаковый для обоих игроков блок «что произошло»
         setup = (
@@ -1990,7 +2013,10 @@ async def _run_match_animation(
 
         await _show(result_txt)
         await asyncio.sleep(3.0)
-        return bonus
+        # delta: (da, db) — сколько голов добавить к score_a / score_b
+        if goal:
+            return bonus, (1, 0) if is_attacker else (0, 1)
+        return bonus, (0, 0)
 
     # ── Разбиваем shared_moments по таймам ────────────────────────────────────
     moments = shared_moments or []
@@ -2036,7 +2062,10 @@ async def _run_match_animation(
 
     # ── Интерактив 1-го тайма ─────────────────────────────────────────────────
     for m_cfg in h1_moments:
-        bonus_total += await _interactive_shared(m_cfg)
+        b, (da, db) = await _interactive_shared(m_cfg)
+        bonus_total += b
+        score_a += da
+        score_b += db
 
     # ── 1-й тайм — 40' ─────────────────────────────────────────────────────────
     late_h1 = [(m, t) for m, t in h1_events if 25 < m <= 45]
@@ -2084,7 +2113,10 @@ async def _run_match_animation(
 
     # ── Интерактив 2-го тайма ─────────────────────────────────────────────────
     for m_cfg in h2_moments:
-        bonus_total += await _interactive_shared(m_cfg)
+        b, (da, db) = await _interactive_shared(m_cfg)
+        bonus_total += b
+        score_a += da
+        score_b += db
 
     # ── Концовка — 80'+ ───────────────────────────────────────────────────────
     late2_evs = [(m, t) for m, t in h2_events if m > 65]
