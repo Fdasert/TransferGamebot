@@ -271,8 +271,12 @@ NATION_FLAGS: dict[str, str] = {
     "Serbia": "🇷🇸", "Sierra Leone": "🇸🇱", "Slovakia": "🇸🇰",
     "Slovenia": "🇸🇮", "South Africa": "🇿🇦", "Spain": "🇪🇸",
     "Suriname": "🇸🇷", "Sweden": "🇸🇪", "Switzerland": "🇨🇭",
-    "Türkiye": "🇹🇷", "Ukraine": "🇺🇦", "United States": "🇺🇸",
+    "Türkiye": "🇹🇷", "Turkey": "🇹🇷",          # алиас FIFA 19
+    "Ukraine": "🇺🇦", "United States": "🇺🇸",
     "Uruguay": "🇺🇾", "Uzbekistan": "🇺🇿", "Wales": "🇬🇧",
+    # Алиасы старых версий FIFA
+    "Czech Republic": "🇨🇿",                     # FIFA 19 = Czechia
+    "Holland": "🇳🇱",                             # FIFA 19 = Netherlands
 }
 
 
