@@ -11,7 +11,7 @@ import requests
 import bs4
 
 MIN_RATING  = 82       # игроки ниже этого рейтинга не нужны
-MAX_PAGES   = 60       # страховка — не идём дальше этой страницы (≈1800 игроков)
+MAX_PAGES   = 160      # страховка — хватит до OVR 82 (~4800 игроков)
 DELAY       = 1.2      # секунды между запросами (не DDoS)
 OUTPUT_FILE = "fut_players.csv"
 

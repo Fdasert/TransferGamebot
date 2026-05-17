@@ -44,23 +44,23 @@ logger = logging.getLogger(__name__)
 PACKS: dict[str, dict] = {
     "bronze": {
         "name": "🥉 Бронзовый пак", "cost": 1_500,  "cards": 3,
-        "min_rating": 87, "max_rating": 87, "guaranteed": None,
-        "desc": "3 карты • OVR 87",
+        "min_rating": 82, "max_rating": 84, "guaranteed": None,
+        "desc": "3 карты • OVR 82–84",
     },
     "silver": {
         "name": "🥈 Серебряный пак", "cost": 4_000,  "cards": 3,
-        "min_rating": 88, "max_rating": 89, "guaranteed": None,
-        "desc": "3 карты • OVR 88–89",
+        "min_rating": 85, "max_rating": 87, "guaranteed": None,
+        "desc": "3 карты • OVR 85–87",
     },
     "gold": {
         "name": "🥇 Золотой пак",    "cost": 12_000, "cards": 3,
-        "min_rating": 90, "max_rating": 91, "guaranteed": None,
-        "desc": "3 карты • OVR 90–91",
+        "min_rating": 88, "max_rating": 91, "guaranteed": None,
+        "desc": "3 карты • OVR 88–91",
     },
     "elite": {
         "name": "💎 Элитный пак",    "cost": 30_000, "cards": 3,
-        "min_rating": 92, "max_rating": 95, "guaranteed": None,
-        "desc": "3 карты • OVR 92–95",
+        "min_rating": 92, "max_rating": 97, "guaranteed": None,
+        "desc": "3 карты • OVR 92–97",
     },
     "mega": {
         "name": "⚡ Мега пак",       "cost": 60_000, "cards": 5,
@@ -70,7 +70,8 @@ PACKS: dict[str, dict] = {
 }
 
 RATING_WEIGHTS: dict[int, float] = {
-    87: 40.0,
+    82: 65.0, 83: 25.0, 84: 10.0,
+    85: 60.0, 86: 28.0, 87: 12.0,
     88: 50.0, 89: 28.0, 90: 15.0, 91:  7.0,
     92: 38.0, 93: 28.0, 94: 18.0, 95:  9.0, 96: 5.0, 97: 2.0,
 }
@@ -254,7 +255,7 @@ NATION_FLAGS: dict[str, str] = {
     "Chile": "🇨🇱", "Colombia": "🇨🇴", "Congo DR": "🇨🇩",
     "Côte d'Ivoire": "🇨🇮", "Croatia": "🇭🇷", "Czechia": "🇨🇿",
     "Denmark": "🇩🇰", "Ecuador": "🇪🇨", "Egypt": "🇪🇬",
-    "England": "🏴󠁧󠁢󠁥󠁮󠁧󁿢", "Finland": "🇫🇮", "France": "🇫🇷",
+    "England": "🇬🇧", "Finland": "🇫🇮", "France": "🇫🇷",
     "Gabon": "🇬🇦", "Georgia": "🇬🇪", "Germany": "🇩🇪",
     "Ghana": "🇬🇭", "Greece": "🇬🇷", "Guinea": "🇬🇳",
     "Haiti": "🇭🇹", "Honduras": "🇭🇳", "Hungary": "🇭🇺",
@@ -266,12 +267,12 @@ NATION_FLAGS: dict[str, str] = {
     "Northern Ireland": "🇬🇧", "Norway": "🇳🇴", "Paraguay": "🇵🇾",
     "Peru": "🇵🇪", "Poland": "🇵🇱", "Portugal": "🇵🇹",
     "Republic of Ireland": "🇮🇪", "Romania": "🇷🇴", "Russia": "🇷🇺",
-    "Saudi Arabia": "🇸🇦", "Scotland": "🏴󠁧󠁢󠁳󠁣󠁴󁿢", "Senegal": "🇸🇳",
+    "Saudi Arabia": "🇸🇦", "Scotland": "🇬🇧", "Senegal": "🇸🇳",
     "Serbia": "🇷🇸", "Sierra Leone": "🇸🇱", "Slovakia": "🇸🇰",
     "Slovenia": "🇸🇮", "South Africa": "🇿🇦", "Spain": "🇪🇸",
     "Suriname": "🇸🇷", "Sweden": "🇸🇪", "Switzerland": "🇨🇭",
     "Türkiye": "🇹🇷", "Ukraine": "🇺🇦", "United States": "🇺🇸",
-    "Uruguay": "🇺🇾", "Uzbekistan": "🇺🇿", "Wales": "🏴󠁧󠁢󠁷󠁬󠁳󁿢",
+    "Uruguay": "🇺🇾", "Uzbekistan": "🇺🇿", "Wales": "🇬🇧",
 }
 
 
