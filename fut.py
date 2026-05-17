@@ -707,7 +707,8 @@ async def cb_fut_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
              InlineKeyboardButton("🏟 Мой клуб",    callback_data="fut_club_0_od")],
             [InlineKeyboardButton("🧩 Команда",     callback_data="fut_team"),
              InlineKeyboardButton("⚔️ Матчи",       callback_data="fut_match")],
-            [InlineKeyboardButton("🛒 Рынок",       callback_data="fut_market")],
+            [InlineKeyboardButton("🛒 Рынок",       callback_data="fut_market"),
+             InlineKeyboardButton("🎲 Драфт",       callback_data="fut_draft")],
             [InlineKeyboardButton("◀ В меню",       callback_data="menu_back")],
         ]),
     )
@@ -3606,6 +3607,963 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ДРАФТ — КОНСТАНТЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+DRAFT_MIN_OVR   = 82
+DRAFT_MATCHES   = 3         # solo: number of matches
+DRAFT_PICK_N    = 3         # choices per slot
+DRAFT_ENTRY_FEE = 300       # coins entry fee
+
+# Rewards per wins (solo)
+DRAFT_REWARDS: dict[int, tuple[int, bool]] = {
+    0: (100,   False),   # (coins, exclusive_pack)
+    1: (400,   False),
+    2: (900,   False),
+    3: (2000,  True),    # 3/3: big coins + exclusive pack (3 cards added to club)
+}
+DRAFT_PACK_CARDS   = 3    # cards in exclusive pack
+DRAFT_PACK_MIN_OVR = 83   # minimum OVR for pack cards
+
+# Position group → fut_players positions mapping
+DRAFT_POS_MAP: dict[str, list[str]] = {
+    "GK":  ["GK"],
+    "DEF": ["CB", "LB", "RB", "LWB", "RWB"],
+    "MID": ["CDM", "CM", "CAM", "LM", "RM"],
+    "ATT": ["LW", "RW", "CF", "ST"],
+}
+
+# Multi-draft rooms (module-level, in-memory)
+_draft_rooms: dict[str, dict] = {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ДРАФТ — ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _draft_get_options(group: str, exclude_ids: set[int]) -> list[dict]:
+    """Query fut_players for DRAFT_PICK_N random players matching the group."""
+    valid_positions = DRAFT_POS_MAP.get(group, [])
+    res = (
+        db.get_client().table("fut_players")
+        .select("id, name, club, nation, position, rating, version, pac, sho, pas, dri, def, phy")
+        .gte("rating", DRAFT_MIN_OVR)
+        .in_("position", valid_positions)
+        .execute()
+    )
+    players = [p for p in (res.data or []) if p["id"] not in exclude_ids]
+    return random.sample(players, min(DRAFT_PICK_N, len(players)))
+
+
+def _draft_build_sa(picks: dict) -> dict:
+    """Build att/def_/ovr/chem/placed from picks dict {slot_name: player_data}."""
+    att_vals: list[float] = []
+    def_vals: list[float] = []
+    gk_vals:  list[float] = []
+    scorers:  list[str]   = []
+    all_names: list[str]  = []
+    pas_sum = 0
+
+    for slot_name, player in picks.items():
+        pos   = player.get("position", "")
+        group = DRAFT_POS_MAP.get("GK", [])
+        # Determine group from slot FORMATIONS context if possible, else from position
+        if pos == "GK":
+            gk_vals.append((player["def"] + player["phy"] + player["pas"]) / 3)
+        elif pos in ("CB", "LB", "RB", "LWB", "RWB"):
+            def_vals.append((player["def"] + player["phy"]) / 2)
+        elif pos in ("CDM", "CM", "CAM", "LM", "RM"):
+            att_vals.append((player["pac"] + player["sho"] + player["dri"]) / 3)
+            def_vals.append((player["def"] + player["phy"]) / 2)
+        else:  # ATT
+            att_vals.append((player["pac"] + player["sho"] + player["dri"]) / 3)
+
+        short = _short_name(player.get("name", "Игрок"))
+        all_names.append(short)
+        if pos != "GK":
+            scorers.append(short)
+        pas_sum += player.get("pas", 75)
+
+    att  = round(sum(att_vals) / len(att_vals) * 1.05) if att_vals else 75
+    if def_vals or gk_vals:
+        d_avg = sum(def_vals) / max(len(def_vals), 1) if def_vals else 75
+        g_avg = sum(gk_vals)  / max(len(gk_vals),  1) if gk_vals  else 75
+        def_  = round(d_avg * 0.7 + g_avg * 0.3)
+    else:
+        def_ = 75
+    ovr     = round(sum(p["rating"] for p in picks.values()) / max(len(picks), 1))
+    chem    = 70
+    placed  = len(picks)
+    pas_avg = round(pas_sum / max(placed, 1))
+    gk_name = next(
+        (_short_name(p["name"]) for p in picks.values() if p.get("position") == "GK"),
+        "Вратарь",
+    )
+
+    return {
+        "att": att, "def_": def_, "ovr": ovr, "chem": chem, "placed": placed,
+        "scorers":   scorers   or all_names or ["Игрок"],
+        "all_names": all_names or ["Игрок"],
+        "gk_name":  gk_name,
+        "pas_avg":  pas_avg,
+    }
+
+
+def _draft_bot_sa(min_ovr: int, max_ovr: int) -> dict:
+    """Build a random bot team SA by sampling fut_players in the OVR range."""
+    res = (
+        db.get_client().table("fut_players")
+        .select("position, pac, sho, pas, dri, def, phy, rating")
+        .gte("rating", min_ovr).lte("rating", max_ovr)
+        .execute()
+    )
+    players = res.data or []
+    if not players:
+        return {"att": min_ovr - 5, "def_": min_ovr - 5, "ovr": min_ovr,
+                "chem": 60, "placed": 11,
+                "scorers": ["Бот"], "all_names": ["Бот"], "gk_name": "Бот", "pas_avg": 70}
+
+    sample = random.sample(players, min(11, len(players)))
+    att_vals, def_vals, gk_vals = [], [], []
+    pas_sum = 0
+    for p in sample:
+        pos = p.get("position", "")
+        if pos == "GK":
+            gk_vals.append((p["def"] + p["phy"] + p["pas"]) / 3)
+        elif pos in ("CB", "LB", "RB", "LWB", "RWB"):
+            def_vals.append((p["def"] + p["phy"]) / 2)
+        elif pos in ("CDM", "CM", "CAM", "LM", "RM"):
+            att_vals.append((p["pac"] + p["sho"] + p["dri"]) / 3)
+            def_vals.append((p["def"] + p["phy"]) / 2)
+        else:
+            att_vals.append((p["pac"] + p["sho"] + p["dri"]) / 3)
+        pas_sum += p.get("pas", 70)
+
+    att  = round(sum(att_vals) / len(att_vals)) if att_vals else min_ovr - 5
+    if def_vals or gk_vals:
+        d_avg = sum(def_vals) / max(len(def_vals), 1) if def_vals else min_ovr - 5
+        g_avg = sum(gk_vals)  / max(len(gk_vals),  1) if gk_vals  else min_ovr - 5
+        def_  = round(d_avg * 0.7 + g_avg * 0.3)
+    else:
+        def_ = min_ovr - 5
+    ovr     = round(sum(p["rating"] for p in sample) / len(sample))
+    pas_avg = round(pas_sum / max(len(sample), 1))
+
+    return {
+        "att": att, "def_": def_, "ovr": ovr, "chem": 60, "placed": len(sample),
+        "scorers": ["Бот"], "all_names": ["Бот"], "gk_name": "Бот", "pas_avg": pas_avg,
+    }
+
+
+def _draft_slot_order(formation: str) -> list[tuple[str, str]]:
+    """Returns list of (slot_name, group) in pick order: GK first, then DEF, MID, ATT."""
+    slots = FORMATIONS[formation]["slots"]
+    order: list[tuple[str, str]] = []
+    for group in ["GK", "DEF", "MID", "ATT"]:
+        for slot_name, g in slots.items():
+            if g == group:
+                order.append((slot_name, g))
+    return order
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ДРАФТ — СОЛО ФЛОУ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _show_draft_pick(q, data: dict) -> None:
+    """Display current pick choice for a draft slot."""
+    slot_order = data["slot_order"]        # list of [slot_name, group]
+    slot_idx   = data["slot_idx"]
+    slot_name, group = slot_order[slot_idx]
+    options    = data["current_options"]
+    total      = len(slot_order)
+
+    group_name = GROUP_NAME.get(group, group)
+    lines = [
+        f"🎲 *Драфт — Слот {slot_idx + 1}/{total}*\n",
+        f"📌 Позиция: `{slot_name}` ({group_name})\n",
+        "_Выбери одного из трёх:_",
+    ]
+    text = "\n".join(lines)
+
+    kb = []
+    for p in options:
+        emoji = _card_emoji(p["rating"])
+        ver   = p.get("version", "")
+        ver_s = f" ({ver})" if ver else ""
+        lbl   = f"{emoji} {p['rating']} {p['position']} {p['name'][:16]}{ver_s}"
+        kb.append([InlineKeyboardButton(lbl, callback_data=f"fut_draft_pick_{p['id']}")])
+    kb.append([InlineKeyboardButton("❌ Отмена", callback_data="fut_menu")])
+
+    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def _show_draft_mpick(q, data: dict) -> None:
+    """Display current pick choice for a multi-draft slot."""
+    slot_order = data["slot_order"]
+    slot_idx   = data["slot_idx"]
+    slot_name, group = slot_order[slot_idx]
+    options    = data["current_options"]
+    total      = len(slot_order)
+
+    group_name = GROUP_NAME.get(group, group)
+    lines = [
+        f"🎲 *Мульти-Драфт — Слот {slot_idx + 1}/{total}*\n",
+        f"📌 Позиция: `{slot_name}` ({group_name})\n",
+        "_Выбери одного из трёх:_",
+    ]
+    text = "\n".join(lines)
+
+    kb = []
+    for p in options:
+        emoji = _card_emoji(p["rating"])
+        ver   = p.get("version", "")
+        ver_s = f" ({ver})" if ver else ""
+        lbl   = f"{emoji} {p['rating']} {p['position']} {p['name'][:16]}{ver_s}"
+        kb.append([InlineKeyboardButton(lbl, callback_data=f"fut_draft_mpick_{p['id']}")])
+    kb.append([InlineKeyboardButton("❌ Отмена", callback_data="fut_menu")])
+
+    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_draft(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft$ — main draft menu."""
+    q = update.callback_query
+    await q.answer()
+
+    await q.edit_message_text(
+        "🎲 *FUT Драфт*\n\n"
+        "Выбери режим:\n"
+        "*Соло* — собери команду и сыграй 3 матча против бота.\n"
+        "*Мульти* — пригласи соперника, оба драфтите, потом матч.\n\n"
+        f"💰 Взнос: *{_fmt(DRAFT_ENTRY_FEE)}* монет",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 Соло-драфт",  callback_data="fut_draft_solo"),
+             InlineKeyboardButton("⚔️ Мульти-драфт", callback_data="fut_draft_multi")],
+            [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")],
+        ]),
+    )
+
+
+async def cb_fut_draft_solo_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_solo$ — check fee, show formation picker."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    coins = db.get_coins(uid)
+    if coins < DRAFT_ENTRY_FEE:
+        await q.edit_message_text(
+            f"❌ Недостаточно монет!\n\n"
+            f"Нужно: *{_fmt(DRAFT_ENTRY_FEE)}* 💰\n"
+            f"Твой баланс: *{_fmt(coins)}* 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_draft")]
+            ]),
+        )
+        return
+
+    items = [
+        InlineKeyboardButton(f["label"], callback_data=f"fut_draft_form_{key}")
+        for key, f in FORMATIONS.items()
+    ]
+    rows = [items[i:i+2] for i in range(0, len(items), 2)]
+    rows.append([InlineKeyboardButton("◀ Отмена", callback_data="fut_draft")])
+
+    await q.edit_message_text(
+        f"🎯 *Соло-Драфт*\n\n"
+        f"Выбери схему расстановки:\n"
+        f"_Взнос: {_fmt(DRAFT_ENTRY_FEE)} 💰_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_fut_draft_form(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_form_(\w+)$ — formation chosen, deduct fee, begin picking."""
+    q        = update.callback_query
+    uid      = q.from_user.id
+    form_key = q.data[len("fut_draft_form_"):]
+
+    if form_key not in FORMATIONS:
+        await q.answer("Неизвестная схема.", show_alert=True)
+        return
+
+    ok, _ = db.spend_coins(uid, DRAFT_ENTRY_FEE)
+    if not ok:
+        await q.answer("Недостаточно монет!", show_alert=True)
+        return
+
+    await q.answer()
+
+    slot_order = _draft_slot_order(form_key)
+    first_slot, first_group = slot_order[0]
+    options = _draft_get_options(first_group, set())
+
+    data: dict = {
+        "formation":        form_key,
+        "slot_order":       [[s, g] for s, g in slot_order],
+        "slot_idx":         0,
+        "picks":            {},
+        "used_ids":         [p["id"] for p in options],
+        "current_options":  options,
+        "phase":            "picking",
+        "match_idx":        0,
+        "wins":             0,
+        "match_log":        [],
+    }
+    db.set_pending_action(uid, "fut_draft_solo", data)
+    await _show_draft_pick(q, data)
+
+
+async def cb_fut_draft_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_pick_(\d+)$ — player picked in solo draft."""
+    q         = update.callback_query
+    await q.answer()
+    uid       = q.from_user.id
+    player_id = int(q.data[len("fut_draft_pick_"):])
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_draft_solo":
+        await q.answer("Сессия истекла. Начни заново.", show_alert=True)
+        return
+
+    data = pending["data"]
+    options = data.get("current_options", [])
+
+    # Find picked player
+    picked = next((p for p in options if p["id"] == player_id), None)
+    if not picked:
+        await q.answer("Игрок не найден. Выбери из списка.", show_alert=True)
+        return
+
+    slot_order = data["slot_order"]
+    slot_idx   = data["slot_idx"]
+    slot_name  = slot_order[slot_idx][0]
+
+    # Save pick
+    data["picks"][slot_name] = picked
+    data["used_ids"].append(player_id)
+    data["slot_idx"] = slot_idx + 1
+
+    if data["slot_idx"] < len(slot_order):
+        # Get options for next slot
+        next_slot, next_group = slot_order[data["slot_idx"]]
+        next_opts = _draft_get_options(next_group, set(data["used_ids"]))
+        data["current_options"] = next_opts
+        data["used_ids"].extend(p["id"] for p in next_opts)
+        db.set_pending_action(uid, "fut_draft_solo", data)
+        await _show_draft_pick(q, data)
+    else:
+        # All 11 picked — show summary
+        data["phase"] = "playing"
+        data["current_options"] = []
+        db.set_pending_action(uid, "fut_draft_solo", data)
+
+        form_label = FORMATIONS[data["formation"]]["label"]
+        sa         = _draft_build_sa(data["picks"])
+
+        lines = [
+            f"✅ *Команда собрана!* ({form_label})\n",
+            f"⭐ OVR: *{sa['ovr']}*  ATT: *{sa['att']}*  DEF: *{sa['def_']}*\n",
+            "Твои игроки:\n",
+        ]
+        for slot_name_k, p in data["picks"].items():
+            emoji = _card_emoji(p["rating"])
+            lines.append(f"• `{slot_name_k}` {emoji} {p['rating']} {p['name']}")
+
+        await q.edit_message_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Начать матчи", callback_data="fut_draft_play")],
+            ]),
+        )
+
+
+async def cb_fut_draft_play(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_play$ — announce next match."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_draft_solo":
+        await q.answer("Сессия истекла. Начни заново.", show_alert=True)
+        return
+
+    data      = pending["data"]
+    match_idx = data["match_idx"]
+
+    if match_idx >= DRAFT_MATCHES:
+        # Should not happen, but redirect to reward
+        await cb_fut_draft_reward(update, ctx)
+        return
+
+    bot_ranges = [(82, 84), (83, 85), (84, 86)]
+    mn, mx = bot_ranges[min(match_idx, len(bot_ranges) - 1)]
+    bot_ovr = round((mn + mx) / 2)
+
+    await q.edit_message_text(
+        f"⚔️ *Матч {match_idx + 1}/{DRAFT_MATCHES}*\n\n"
+        f"🔵 Ты  vs  🤖 Бот OVR {bot_ovr}\n\n"
+        "_Готов?_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶ Играть", callback_data="fut_draft_match")],
+        ]),
+    )
+
+
+async def cb_fut_draft_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_match$ — simulate one match."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_draft_solo":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    data      = pending["data"]
+    match_idx = data["match_idx"]
+
+    sa = _draft_build_sa(data["picks"])
+
+    bot_ranges = [(82, 84), (83, 85), (84, 86)]
+    mn, mx     = bot_ranges[min(match_idx, len(bot_ranges) - 1)]
+    bot_sa     = _draft_bot_sa(mn, mx)
+    bot_ovr    = round((mn + mx) / 2)
+
+    match_stats = _simulate_match(sa, bot_sa)
+    my_score    = match_stats["score_a"]
+    bot_score   = match_stats["score_b"]
+    won         = my_score > bot_score
+    draw        = my_score == bot_score
+
+    if won:
+        data["wins"] += 1
+
+    data["match_log"].append({"my": my_score, "bot": bot_score})
+    data["match_idx"] = match_idx + 1
+    db.set_pending_action(uid, "fut_draft_solo", data)
+
+    result_icon = "✅ Победа!" if won else ("🤝 Ничья!" if draw else "❌ Поражение")
+
+    if data["match_idx"] < DRAFT_MATCHES:
+        await q.edit_message_text(
+            f"⚽ *Матч {match_idx + 1}/{DRAFT_MATCHES}*\n\n"
+            f"🔵 Ты  *{my_score} : {bot_score}*  🤖 Бот (OVR {bot_ovr})\n\n"
+            f"{result_icon}\n\n"
+            f"Побед: *{data['wins']}/{data['match_idx']}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("▶ Следующий матч", callback_data="fut_draft_play")],
+            ]),
+        )
+    else:
+        # All matches done
+        wins = data["wins"]
+        coins_reward, get_pack = DRAFT_REWARDS.get(wins, (0, False))
+
+        log_lines = []
+        for i, m in enumerate(data["match_log"]):
+            my_s, bot_s = m["my"], m["bot"]
+            ico = "✅" if my_s > bot_s else ("🤝" if my_s == bot_s else "❌")
+            log_lines.append(f"• Матч {i + 1}: {my_s}:{bot_s} {ico}")
+
+        pack_line = "\n🎁 Эксклюзивный пак (+3 карточки OVR 83+)!" if get_pack else ""
+
+        await q.edit_message_text(
+            f"🏁 *Матч {match_idx + 1}/{DRAFT_MATCHES}*\n\n"
+            f"🔵 Ты  *{my_score} : {bot_score}*  🤖 Бот (OVR {bot_ovr})\n\n"
+            f"{result_icon}\n\n"
+            f"Побед: *{wins}/{DRAFT_MATCHES}*\n\n"
+            f"💰 Награда: *{_fmt(coins_reward)} монет*{pack_line}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏆 Получить награду", callback_data="fut_draft_reward")],
+            ]),
+        )
+
+
+async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_reward$ — give final reward."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_draft_solo":
+        await q.answer("Сессия не найдена.", show_alert=True)
+        return
+
+    data = pending["data"]
+    wins = data.get("wins", 0)
+    coins_reward, get_pack = DRAFT_REWARDS.get(wins, (0, False))
+
+    if coins_reward > 0:
+        db.add_coins(uid, coins_reward)
+
+    pack_lines: list[str] = []
+    if get_pack:
+        res = (
+            db.get_client().table("fut_players")
+            .select("id, name, rating, position")
+            .gte("rating", DRAFT_PACK_MIN_OVR)
+            .execute()
+        )
+        pack_pool = res.data or []
+        if pack_pool:
+            pack_cards = random.sample(pack_pool, min(DRAFT_PACK_CARDS, len(pack_pool)))
+            _add_to_club(uid, [c["id"] for c in pack_cards])
+            pack_lines.append("\n🎁 *Эксклюзивный пак — получено:*")
+            for c in pack_cards:
+                emoji = _card_emoji(c["rating"])
+                pack_lines.append(f"  {emoji} {c['rating']} {c['position']} {c['name']}")
+
+    db.clear_pending_action(uid)
+
+    log_lines = []
+    for i, m in enumerate(data.get("match_log", [])):
+        my_s, bot_s = m["my"], m["bot"]
+        ico = "✅" if my_s > bot_s else ("🤝" if my_s == bot_s else "❌")
+        log_lines.append(f"• Матч {i + 1}: {my_s}:{bot_s} {ico}")
+
+    results_block = "\n".join(log_lines) if log_lines else "—"
+    pack_block    = "\n".join(pack_lines) if pack_lines else ""
+
+    await q.edit_message_text(
+        f"🏆 *Драфт завершён!*\n\n"
+        f"Результаты:\n{results_block}\n\n"
+        f"Побед: *{wins}/{DRAFT_MATCHES}*\n\n"
+        f"💰 Награда: *{_fmt(coins_reward)} монет*"
+        f"{pack_block}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")],
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ДРАФТ — МУЛЬТИ ФЛОУ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _show_draft_multi_player_list(q, uid: int, offset: int) -> None:
+    """Paginated player list for multi-draft invite."""
+    all_users  = db.get_all_users(exclude_user_id=uid)
+    eligible   = [u for u in all_users if u["user_id"] != uid]
+    PAGE       = 8
+    total      = len(eligible)
+    page_users = eligible[offset: offset + PAGE]
+
+    if not page_users:
+        await q.edit_message_text(
+            "⚔️ *Мульти-Драфт*\n\n_Нет других игроков._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_draft")]
+            ]),
+        )
+        return
+
+    kb = []
+    for u in page_users:
+        name  = (u.get("display_name") or u.get("username") or f"User{u['user_id']}")[:20]
+        label = f"👤 {name}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"fut_draft_multi_inv_{u['user_id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_draft_multi_invp_{offset - PAGE}"))
+    if offset + PAGE < total:
+        nav.append(InlineKeyboardButton("Вперёд ▶", callback_data=f"fut_draft_multi_invp_{offset + PAGE}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Отмена", callback_data="fut_draft")])
+
+    cur_page = offset // PAGE + 1
+    pages    = (total + PAGE - 1) // PAGE
+    await q.edit_message_text(
+        f"⚔️ *Мульти-Драфт*\n_Выбери соперника ({cur_page}/{pages}):_\n"
+        f"_Взнос: {_fmt(DRAFT_ENTRY_FEE)} 💰_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_draft_multi(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_multi$ — show player picker."""
+    q = update.callback_query
+    await q.answer()
+    await _show_draft_multi_player_list(q, q.from_user.id, offset=0)
+
+
+async def cb_fut_draft_multi_invpage(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_multi_invp_(\d+)$"""
+    q      = update.callback_query
+    await q.answer()
+    offset = int(q.data[len("fut_draft_multi_invp_"):])
+    await _show_draft_multi_player_list(q, q.from_user.id, offset=offset)
+
+
+async def cb_fut_draft_multi_invite(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_multi_inv_(\d+)$ — invite chosen player."""
+    q        = update.callback_query
+    await q.answer()
+    host_uid = q.from_user.id
+    guest_uid = int(q.data[len("fut_draft_multi_inv_"):])
+
+    if guest_uid == host_uid:
+        await q.answer("Нельзя пригласить самого себя.", show_alert=True)
+        return
+
+    coins = db.get_coins(host_uid)
+    if coins < DRAFT_ENTRY_FEE:
+        await q.edit_message_text(
+            f"❌ Недостаточно монет!\n\nНужно: *{_fmt(DRAFT_ENTRY_FEE)}* 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_draft")]
+            ]),
+        )
+        return
+
+    ok, _ = db.spend_coins(host_uid, DRAFT_ENTRY_FEE)
+    if not ok:
+        await q.answer("Не удалось снять монеты.", show_alert=True)
+        return
+
+    host_user  = db.get_user(host_uid)
+    guest_user = db.get_user(guest_uid)
+    host_name  = (host_user or {}).get("display_name") or q.from_user.first_name or f"User{host_uid}"
+    guest_name = (guest_user or {}).get("display_name") or f"User{guest_uid}"
+    host_name  = host_name[:20]
+    guest_name = guest_name[:20]
+
+    room_id = f"dr_{host_uid}_{guest_uid}"
+    _draft_rooms[room_id] = {
+        "host_uid":   host_uid,
+        "guest_uid":  guest_uid,
+        "host_name":  host_name,
+        "guest_name": guest_name,
+        "host_sa":    None,
+        "guest_sa":   None,
+    }
+
+    # Notify guest
+    try:
+        await ctx.bot.send_message(
+            chat_id=guest_uid,
+            text=(
+                f"⚔️ *{host_name}* приглашает тебя в FUT Драфт!\n\n"
+                f"Взнос: *{_fmt(DRAFT_ENTRY_FEE)}* 💰"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Принять",   callback_data=f"fut_draft_join_{host_uid}"),
+                 InlineKeyboardButton("❌ Отклонить", callback_data=f"fut_draft_decline_{host_uid}")],
+            ]),
+        )
+    except Exception as e:
+        logger.warning(f"Draft invite DM failed for {guest_uid}: {e}")
+
+    # Host starts picking immediately — show formation picker
+    items = [
+        InlineKeyboardButton(f["label"], callback_data=f"fut_draft_mform_{key}")
+        for key, f in FORMATIONS.items()
+    ]
+    rows = [items[i:i+2] for i in range(0, len(items), 2)]
+
+    # Store room_id in host pending_action
+    db.set_pending_action(host_uid, "fut_draft_multi", {
+        "room_id":     room_id,
+        "slot_order":  [],
+        "slot_idx":    0,
+        "picks":       {},
+        "used_ids":    [],
+        "current_options": [],
+        "phase":       "formation",
+        "role":        "host",
+    })
+
+    await q.edit_message_text(
+        f"✅ Приглашение отправлено *{guest_name}*!\n\n"
+        f"Выбери схему расстановки:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_fut_draft_multi_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_join_(\d+)$ — guest accepts multi draft invite."""
+    q         = update.callback_query
+    await q.answer()
+    guest_uid = q.from_user.id
+    host_uid  = int(q.data[len("fut_draft_join_"):])
+
+    room_id = f"dr_{host_uid}_{guest_uid}"
+    room    = _draft_rooms.get(room_id)
+    if not room:
+        await q.edit_message_text(
+            "❌ Комната не найдена. Возможно, хост отменил приглашение.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+            ]),
+        )
+        return
+
+    ok, _ = db.spend_coins(guest_uid, DRAFT_ENTRY_FEE)
+    if not ok:
+        await q.edit_message_text(
+            f"❌ Недостаточно монет!\n\nНужно: *{_fmt(DRAFT_ENTRY_FEE)}* 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+            ]),
+        )
+        return
+
+    # Guest picks formation
+    items = [
+        InlineKeyboardButton(f["label"], callback_data=f"fut_draft_mform_{key}")
+        for key, f in FORMATIONS.items()
+    ]
+    rows = [items[i:i+2] for i in range(0, len(items), 2)]
+
+    db.set_pending_action(guest_uid, "fut_draft_multi", {
+        "room_id":     room_id,
+        "slot_order":  [],
+        "slot_idx":    0,
+        "picks":       {},
+        "used_ids":    [],
+        "current_options": [],
+        "phase":       "formation",
+        "role":        "guest",
+    })
+
+    await q.edit_message_text(
+        "⚔️ *FUT Мульти-Драфт*\n\nВыбери схему расстановки:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_fut_draft_multi_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_decline_(\d+)$ — guest declines invite."""
+    q         = update.callback_query
+    await q.answer()
+    guest_uid = q.from_user.id
+    host_uid  = int(q.data[len("fut_draft_decline_"):])
+
+    room_id = f"dr_{host_uid}_{guest_uid}"
+    _draft_rooms.pop(room_id, None)
+
+    # Refund host
+    db.add_coins(host_uid, DRAFT_ENTRY_FEE)
+    db.clear_pending_action(host_uid)
+
+    # Notify host
+    try:
+        await ctx.bot.send_message(
+            chat_id=host_uid,
+            text="❌ Соперник отклонил приглашение в драфт.",
+        )
+    except Exception as e:
+        logger.warning(f"Draft decline notify failed: {e}")
+
+    await q.edit_message_text(
+        "Приглашение отклонено.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+        ]),
+    )
+
+
+async def cb_fut_draft_multi_form(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_mform_(\w+)$ — host or guest picks formation in multi draft."""
+    q        = update.callback_query
+    await q.answer()
+    uid      = q.from_user.id
+    form_key = q.data[len("fut_draft_mform_"):]
+
+    if form_key not in FORMATIONS:
+        await q.answer("Неизвестная схема.", show_alert=True)
+        return
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_draft_multi":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    data       = pending["data"]
+    slot_order = _draft_slot_order(form_key)
+    first_slot, first_group = slot_order[0]
+    options    = _draft_get_options(first_group, set())
+
+    data.update({
+        "formation":       form_key,
+        "slot_order":      [[s, g] for s, g in slot_order],
+        "slot_idx":        0,
+        "picks":           {},
+        "used_ids":        [p["id"] for p in options],
+        "current_options": options,
+        "phase":           "picking",
+    })
+    db.set_pending_action(uid, "fut_draft_multi", data)
+    await _show_draft_mpick(q, data)
+
+
+async def cb_fut_draft_multi_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_draft_mpick_(\d+)$ — pick card in multi draft."""
+    q         = update.callback_query
+    await q.answer()
+    uid       = q.from_user.id
+    player_id = int(q.data[len("fut_draft_mpick_"):])
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_draft_multi":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    data    = pending["data"]
+    options = data.get("current_options", [])
+    picked  = next((p for p in options if p["id"] == player_id), None)
+    if not picked:
+        await q.answer("Игрок не найден.", show_alert=True)
+        return
+
+    slot_order = data["slot_order"]
+    slot_idx   = data["slot_idx"]
+    slot_name  = slot_order[slot_idx][0]
+
+    data["picks"][slot_name] = picked
+    data["used_ids"].append(player_id)
+    data["slot_idx"] = slot_idx + 1
+
+    if data["slot_idx"] < len(slot_order):
+        next_slot, next_group = slot_order[data["slot_idx"]]
+        next_opts = _draft_get_options(next_group, set(data["used_ids"]))
+        data["current_options"] = next_opts
+        data["used_ids"].extend(p["id"] for p in next_opts)
+        db.set_pending_action(uid, "fut_draft_multi", data)
+        await _show_draft_mpick(q, data)
+    else:
+        # All 11 picked — compute SA and store in room
+        data["phase"]           = "done"
+        data["current_options"] = []
+        db.set_pending_action(uid, "fut_draft_multi", data)
+
+        sa      = _draft_build_sa(data["picks"])
+        room_id = data["room_id"]
+        room    = _draft_rooms.get(room_id)
+
+        if room:
+            role = data.get("role", "host")
+            if role == "host":
+                room["host_sa"] = sa
+            else:
+                room["guest_sa"] = sa
+
+        await q.edit_message_text(
+            "✅ *Драфт завершён!*\n\nЖдём соперника...",
+            parse_mode="Markdown",
+        )
+
+        # Check if both ready
+        if room:
+            await _draft_multi_check_and_start(room_id, ctx.bot, q.from_user.id)
+
+
+async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> None:
+    """If both players done picking, run the match and award coins."""
+    room = _draft_rooms.get(room_id)
+    if not room:
+        return
+    if not room["host_sa"] or not room["guest_sa"]:
+        return
+
+    host_uid   = room["host_uid"]
+    guest_uid  = room["guest_uid"]
+    host_name  = room["host_name"]
+    guest_name = room["guest_name"]
+    sa         = room["host_sa"]   # host = team A
+    sb         = room["guest_sa"]  # guest = team B
+
+    match_stats = _simulate_match(sa, sb)
+    score_h     = match_stats["score_a"]
+    score_g     = match_stats["score_b"]
+
+    # Rewards
+    pot = int(DRAFT_ENTRY_FEE * 2 * 0.9)   # 90% of both fees
+    bonus = 200
+
+    if score_h > score_g:
+        coins_h = pot + bonus
+        coins_g = 0
+        result_h = "🏆 Победа!"
+        result_g = "❌ Поражение"
+    elif score_g > score_h:
+        coins_h = 0
+        coins_g = pot + bonus
+        result_h = "❌ Поражение"
+        result_g = "🏆 Победа!"
+    else:
+        coins_h = DRAFT_ENTRY_FEE
+        coins_g = DRAFT_ENTRY_FEE
+        result_h = result_g = "🤝 Ничья!"
+
+    if coins_h > 0:
+        db.add_coins(host_uid, coins_h)
+    if coins_g > 0:
+        db.add_coins(guest_uid, coins_g)
+
+    db.clear_pending_action(host_uid)
+    db.clear_pending_action(guest_uid)
+    _draft_rooms.pop(room_id, None)
+
+    # Send results to host
+    try:
+        await bot.send_message(
+            chat_id=host_uid,
+            text=(
+                f"⚽ *FUT Драфт — Результат*\n\n"
+                f"🔵 {host_name}  *{score_h} : {score_g}*  🔴 {guest_name}\n\n"
+                f"{result_h}\n"
+                f"💰 Монеты: *+{_fmt(coins_h)}*"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+            ]),
+        )
+    except Exception as e:
+        logger.warning(f"Draft multi result DM host failed: {e}")
+
+    # Send results to guest
+    try:
+        await bot.send_message(
+            chat_id=guest_uid,
+            text=(
+                f"⚽ *FUT Драфт — Результат*\n\n"
+                f"🔵 {host_name}  *{score_h} : {score_g}*  🔴 {guest_name}\n\n"
+                f"{result_g}\n"
+                f"💰 Монеты: *+{_fmt(coins_g)}*"
+            ),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
+            ]),
+        )
+    except Exception as e:
+        logger.warning(f"Draft multi result DM guest failed: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  REGISTRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -3665,4 +4623,19 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_trade_newp_",              cb_fut_trade_new_page), # пагинация списка
         ("^fut_trade_new$",               cb_fut_trade_new),
         ("^fut_trade$",                   cb_fut_trade),
+        # ── Драфт ─────────────────────────────────────────────────────────────
+        ("^fut_draft_multi_invp_",        cb_fut_draft_multi_invpage),
+        ("^fut_draft_multi_inv_",         cb_fut_draft_multi_invite),
+        ("^fut_draft_mform_",             cb_fut_draft_multi_form),
+        ("^fut_draft_mpick_",             cb_fut_draft_multi_pick),
+        ("^fut_draft_join_",              cb_fut_draft_multi_join),
+        ("^fut_draft_decline_",           cb_fut_draft_multi_decline),
+        ("^fut_draft_multi$",             cb_fut_draft_multi),
+        ("^fut_draft_form_",              cb_fut_draft_form),
+        ("^fut_draft_pick_",              cb_fut_draft_pick),
+        ("^fut_draft_play$",              cb_fut_draft_play),
+        ("^fut_draft_match$",             cb_fut_draft_match),
+        ("^fut_draft_reward$",            cb_fut_draft_reward),
+        ("^fut_draft_solo$",              cb_fut_draft_solo_start),
+        ("^fut_draft$",                   cb_fut_draft),
     ]
