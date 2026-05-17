@@ -25,6 +25,7 @@ from telegram.error import TelegramError
 
 import database as db
 import casino as casino_module
+import fut as fut_module
 from scoring import calculate_points, calculate_elo, calculate_placement_rating, format_fee, parse_fee_input
 from config import (
     BOT_TOKEN,
@@ -59,7 +60,8 @@ def main_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")],
         [InlineKeyboardButton("🏆 Рейтинг", callback_data="menu_leaderboard"),
          InlineKeyboardButton("❓ Помощь", callback_data="menu_help")],
-        [InlineKeyboardButton("🎰 Казино", callback_data="casino_menu")],
+        [InlineKeyboardButton("🎰 Казино", callback_data="casino_menu"),
+         InlineKeyboardButton("⚽ FUT Клуб", callback_data="fut_menu")],
     ])
 
 
@@ -2064,6 +2066,8 @@ def create_application() -> Application:
         ("^dbg_clearstate_",      cb_dbg_clearstate),
         # Casino
         *casino_module.casino_handlers(),
+        # FUT
+        *fut_module.fut_handlers(),
     ]
     for pattern, handler in handlers:
         app.add_handler(CallbackQueryHandler(handler, pattern=pattern))
