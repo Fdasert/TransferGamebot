@@ -2184,36 +2184,42 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 "attacker_uid": attacker, "keeper_uid": keeper, "moment_id": mid,
             })
 
-    # Анимация для обоих игроков одновременно
-    await asyncio.gather(
-        _run_match_animation(
-            bot=ctx.bot,
-            chat_id=accepter_id,
-            message_id=q.message.message_id,
-            my_name=my_name,
-            opp_name=ch_name,
-            my_uid=accepter_id,
-            stats=stats_ac,
-            r_delta=delta_ac,
-            coins=coins_ac,
-            shared_moments=shared_moments,
-        ),
-        _run_match_animation(
-            bot=ctx.bot,
-            chat_id=challenger_id,
-            message_id=None,
-            my_name=ch_name,
-            opp_name=my_name,
-            my_uid=challenger_id,
-            stats=match_stats,
-            r_delta=delta_ch,
-            coins=coins_ch,
-            shared_moments=shared_moments,
-        ),
-    )
-    # Очищаем shared моменты
-    for mid in [m["moment_id"] for m in shared_moments]:
-        _match_moments.pop(mid, None)
+    # Анимации запускаем как фоновые задачи через create_task —
+    # это критически важно: если awaiting gather, бот НЕ обрабатывает
+    # другие апдейты (нажатия кнопок) пока идёт анимация.
+    # create_task возвращает управление боту сразу, анимации идут параллельно.
+    async def _animations_and_cleanup():
+        await asyncio.gather(
+            _run_match_animation(
+                bot=ctx.bot,
+                chat_id=accepter_id,
+                message_id=q.message.message_id,
+                my_name=my_name,
+                opp_name=ch_name,
+                my_uid=accepter_id,
+                stats=stats_ac,
+                r_delta=delta_ac,
+                coins=coins_ac,
+                shared_moments=shared_moments,
+            ),
+            _run_match_animation(
+                bot=ctx.bot,
+                chat_id=challenger_id,
+                message_id=None,
+                my_name=ch_name,
+                opp_name=my_name,
+                my_uid=challenger_id,
+                stats=match_stats,
+                r_delta=delta_ch,
+                coins=coins_ch,
+                shared_moments=shared_moments,
+            ),
+            return_exceptions=True,
+        )
+        for mid in [m["moment_id"] for m in shared_moments]:
+            _match_moments.pop(mid, None)
+
+    asyncio.create_task(_animations_and_cleanup())
 
 
 async def cb_fut_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
