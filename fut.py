@@ -1183,40 +1183,41 @@ MATCH_K_CALIBRATION  = 80   # первые 5 матчей — быстрое р�
 MATCH_CALIB_GAMES    = 5
 MATCH_MIN_PLACED     = 5    # минимум расставленных игроков для матча
 
-# Интерактивные моменты: ожидаем выбор игрока (asyncio.Event)
-_pending_interactions: dict[int, asyncio.Event] = {}
-_interaction_choices:  dict[int, str]           = {}
+# Интерактивные моменты: выбор игрока (polling-подход, без asyncio.Event)
+# uid → строка выбора (или None = ожидаем)
+_interaction_choices: dict[int, str | None] = {}
 
 
 class _MatchMoment:
-    """Координирует выбор двух игроков в один интерактивный момент."""
+    """Координирует выбор двух игроков в один интерактивный момент (polling)."""
     def __init__(self, moment_type: str, attacker_uid: int, keeper_uid: int):
         self.type         = moment_type
         self.attacker_uid = attacker_uid
         self.keeper_uid   = keeper_uid
-        self._att_choice: str | None = None
-        self._kpr_choice: str | None = None
-        self._ready       = asyncio.Event()
+        self.att_choice: str | None = None
+        self.kpr_choice: str | None = None
 
     def submit(self, uid: int, choice: str) -> None:
         if uid == self.attacker_uid:
-            self._att_choice = choice
+            self.att_choice = choice
         else:
-            self._kpr_choice = choice
-        if self._att_choice and self._kpr_choice:
-            self._ready.set()
+            self.kpr_choice = choice
+
+    def is_ready(self) -> bool:
+        return self.att_choice is not None and self.kpr_choice is not None
 
     async def wait_result(self, timeout: float = 35.0) -> dict:
         """Ждём пока оба сделают выбор. Авто-заполняем при таймауте."""
-        try:
-            await asyncio.wait_for(asyncio.shield(self._ready.wait()), timeout=timeout)
-        except asyncio.TimeoutError:
-            pass
-        if not self._att_choice:
-            self._att_choice = random.choice(["left", "center", "right", "shot", "top"])
-        if not self._kpr_choice:
-            self._kpr_choice = random.choice(["left", "center", "right", "attack", "up"])
-        return {"att": self._att_choice, "kpr": self._kpr_choice}
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            if self.is_ready():
+                break
+            await asyncio.sleep(0.3)
+        if not self.att_choice:
+            self.att_choice = random.choice(["left", "center", "right"])
+        if not self.kpr_choice:
+            self.kpr_choice = random.choice(["left", "center", "right"])
+        return {"att": self.att_choice, "kpr": self.kpr_choice}
 
 _match_moments: dict[str, "_MatchMoment"] = {}
 
@@ -1605,17 +1606,17 @@ def _match_preview_text(my_name: str, opp_name: str, sa: dict, sb: dict,
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _wait_interaction(user_id: int, timeout: float = 30.0) -> str | None:
-    """Ждём выбора от игрока в интерактивный момент. None = таймаут."""
-    evt = asyncio.Event()
-    _pending_interactions[user_id] = evt
+    """Ждём выбора через polling (каждые 0.3с). None = таймаут."""
+    _interaction_choices[user_id] = None          # сбрасываем предыдущий выбор
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        v = _interaction_choices.get(user_id)
+        if v is not None:
+            _interaction_choices.pop(user_id, None)
+            return v
+        await asyncio.sleep(0.3)
     _interaction_choices.pop(user_id, None)
-    try:
-        await asyncio.wait_for(asyncio.shield(evt.wait()), timeout=timeout)
-        return _interaction_choices.get(user_id)
-    except asyncio.TimeoutError:
-        return None
-    finally:
-        _pending_interactions.pop(user_id, None)
+    return None
 
 
 async def cb_fut_interact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1624,26 +1625,16 @@ async def cb_fut_interact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     uid    = q.from_user.id
     choice = q.data[len("fut_int_"):]
 
-    # Сначала проверяем shared матч-момент
-    for moment in list(_match_moments.values()):
-        if uid in (moment.attacker_uid, moment.keeper_uid) and not moment._ready.is_set():
-            moment.submit(uid, choice)
-            # Также сигналим _wait_interaction если есть
-            evt = _pending_interactions.get(uid)
-            if evt and not evt.is_set():
-                _interaction_choices[uid] = choice
-                evt.set()
-            await q.answer("✅ Выбор сделан!")
-            return
+    # Пишем выбор — _wait_interaction подхватит на следующем poll-цикле
+    _interaction_choices[uid] = choice
 
-    # Fallback: индивидуальный момент
-    evt = _pending_interactions.get(uid)
-    if evt and not evt.is_set():
-        _interaction_choices[uid] = choice
-        evt.set()
-        await q.answer("✅ Выбор сделан!")
-    else:
-        await q.answer("⏰ Время вышло!", show_alert=False)
+    # Также submit к shared момент если есть активный для этого игрока
+    for moment in list(_match_moments.values()):
+        if uid in (moment.attacker_uid, moment.keeper_uid):
+            moment.submit(uid, choice)
+            break
+
+    await q.answer("✅ Выбор сделан!")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1727,8 +1718,8 @@ async def _run_match_animation(
 
         # Ждём пока соперник тоже выберет (максимум 5с, потом авто)
         result = await moment.wait_result(timeout=5.0)
-        att_c  = result["att"]
-        kpr_c  = result["kpr"]
+        att_c = result["att"]
+        kpr_c = result["kpr"]
 
         # Вычисляем исход
         if mtype == "penalty":
