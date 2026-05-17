@@ -378,6 +378,206 @@ def get_pvp_bj_lobbies(exclude_uid: int | None = None) -> list[dict]:
     return lobbies
 
 
+# ── FUT Market ───────────────────────────────────────────────────────────────
+
+def create_fut_listing(seller_uid: int, club_id: int, price_coins: int) -> int:
+    """Create a market listing. Returns listing id."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    res = get_client().table("fut_market_listings").insert({
+        "seller_uid": seller_uid,
+        "club_id": club_id,
+        "price_coins": price_coins,
+        "listed_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=48)).isoformat(),
+        "status": "active",
+    }).execute()
+    return res.data[0]["id"]
+
+
+def get_fut_listings(limit: int = 15, offset: int = 0) -> list[dict]:
+    """Active non-expired listings."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    res = (
+        get_client()
+        .table("fut_market_listings")
+        .select("id, seller_uid, club_id, price_coins, listed_at, expires_at")
+        .eq("status", "active")
+        .gt("expires_at", now)
+        .order("listed_at", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+    return res.data or []
+
+
+def get_my_fut_listings(seller_uid: int) -> list[dict]:
+    """All active listings for this seller."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    res = (
+        get_client()
+        .table("fut_market_listings")
+        .select("id, seller_uid, club_id, price_coins, listed_at, expires_at")
+        .eq("seller_uid", seller_uid)
+        .eq("status", "active")
+        .gt("expires_at", now)
+        .order("listed_at", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def get_fut_listing(listing_id: int) -> dict | None:
+    """Single listing row."""
+    res = (
+        get_client()
+        .table("fut_market_listings")
+        .select("id, seller_uid, club_id, price_coins, listed_at, expires_at, status")
+        .eq("id", listing_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def cancel_fut_listing(listing_id: int, seller_uid: int) -> bool:
+    """Cancel listing if owned by seller and still active."""
+    res = (
+        get_client()
+        .table("fut_market_listings")
+        .update({"status": "cancelled"})
+        .eq("id", listing_id)
+        .eq("seller_uid", seller_uid)
+        .eq("status", "active")
+        .execute()
+    )
+    return bool(res.data)
+
+
+def mark_listing_sold(listing_id: int) -> bool:
+    """Mark a listing as sold (must still be active)."""
+    res = (
+        get_client()
+        .table("fut_market_listings")
+        .update({"status": "sold"})
+        .eq("id", listing_id)
+        .eq("status", "active")
+        .execute()
+    )
+    return bool(res.data)
+
+
+# ── FUT Trade Offers ─────────────────────────────────────────────────────────
+
+def create_trade_offer(
+    from_uid: int, to_uid: int,
+    offer_club_ids: list[int], offer_coins: int,
+    want_club_ids: list[int], want_coins: int,
+) -> int:
+    """Create a trade offer. Returns offer id."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    res = get_client().table("fut_trade_offers").insert({
+        "from_uid": from_uid,
+        "to_uid": to_uid,
+        "offer_club_ids": offer_club_ids,
+        "offer_coins": offer_coins,
+        "want_club_ids": want_club_ids,
+        "want_coins": want_coins,
+        "status": "pending",
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(hours=24)).isoformat(),
+    }).execute()
+    return res.data[0]["id"]
+
+
+def get_incoming_trade_offers(to_uid: int) -> list[dict]:
+    """Pending non-expired offers addressed to this user."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    res = (
+        get_client()
+        .table("fut_trade_offers")
+        .select("*")
+        .eq("to_uid", to_uid)
+        .eq("status", "pending")
+        .gt("expires_at", now)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def get_outgoing_trade_offers(from_uid: int) -> list[dict]:
+    """Pending offers sent by this user."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    res = (
+        get_client()
+        .table("fut_trade_offers")
+        .select("*")
+        .eq("from_uid", from_uid)
+        .eq("status", "pending")
+        .gt("expires_at", now)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def get_trade_offer(offer_id: int) -> dict | None:
+    """Single trade offer row."""
+    res = (
+        get_client()
+        .table("fut_trade_offers")
+        .select("*")
+        .eq("id", offer_id)
+        .execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def mark_trade_offer_accepted(offer_id: int, to_uid: int) -> bool:
+    """Mark offer as accepted (validates ownership and pending status)."""
+    res = (
+        get_client()
+        .table("fut_trade_offers")
+        .update({"status": "accepted"})
+        .eq("id", offer_id)
+        .eq("to_uid", to_uid)
+        .eq("status", "pending")
+        .execute()
+    )
+    return bool(res.data)
+
+
+def decline_trade_offer(offer_id: int, to_uid: int) -> bool:
+    res = (
+        get_client()
+        .table("fut_trade_offers")
+        .update({"status": "declined"})
+        .eq("id", offer_id)
+        .eq("to_uid", to_uid)
+        .eq("status", "pending")
+        .execute()
+    )
+    return bool(res.data)
+
+
+def cancel_trade_offer(offer_id: int, from_uid: int) -> bool:
+    res = (
+        get_client()
+        .table("fut_trade_offers")
+        .update({"status": "cancelled"})
+        .eq("id", offer_id)
+        .eq("from_uid", from_uid)
+        .eq("status", "pending")
+        .execute()
+    )
+    return bool(res.data)
+
+
 def apply_elo_result(
     user_a: dict,
     user_b: dict,

@@ -947,6 +947,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     elif action in ("dbg_set_coins", "dbg_set_rating"):
         if _is_superadmin(user_id):
             await _handle_dbg_input(update, ctx, action, data)
+    elif await fut_module.handle_fut_text(update, ctx):
+        pass  # обработано FUT модулем (рынок / трейды)
     else:
         await update.message.reply_text(
             "Используй меню ниже 👇", reply_markup=main_menu_kb()

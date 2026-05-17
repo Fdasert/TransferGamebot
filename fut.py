@@ -707,6 +707,7 @@ async def cb_fut_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
              InlineKeyboardButton("🏟 Мой клуб",    callback_data="fut_club_0_od")],
             [InlineKeyboardButton("🧩 Команда",     callback_data="fut_team"),
              InlineKeyboardButton("⚔️ Матчи",       callback_data="fut_match")],
+            [InlineKeyboardButton("🛒 Рынок",       callback_data="fut_market")],
             [InlineKeyboardButton("◀ В меню",       callback_data="menu_back")],
         ]),
     )
@@ -2451,34 +2452,1181 @@ async def cb_fut_match_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — КОНСТАНТЫ И УТИЛИТЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+MARKET_FEE        = 0.05   # 5% комиссия с продажи
+MARKET_PAGE       = 8      # карточек на страницу
+MAX_CARDS_PER_OFFER = 3
+MAX_ACTIVE_LISTINGS = 5
+
+
+def _card_line(card: dict) -> str:
+    pos  = card.get("position", "?")
+    rat  = card.get("rating", 0)
+    name = card.get("name", "?")
+    ver  = card.get("version", "")
+    return f"{rat} {pos} {name} ({ver})" if ver else f"{rat} {pos} {name}"
+
+
+def _card_emoji(rating: int) -> str:
+    if rating >= 85: return "🟡"
+    if rating >= 80: return "🟢"
+    if rating >= 75: return "⚪"
+    return "🟤"
+
+
+def _transfer_card(club_id: int, new_owner_uid: int) -> bool:
+    """Move a card (user_club row) to new owner. Returns False if card not found."""
+    res = db.get_client().table("user_club").select("id, player_id, user_id").eq("id", club_id).execute()
+    if not res.data:
+        return False
+    db.get_client().table("user_club").update({"user_id": new_owner_uid}).eq("id", club_id).execute()
+    return True
+
+
+def _listing_card_text(card: dict, listing: dict) -> str:
+    """Full listing detail text."""
+    from datetime import datetime, timezone
+    expires_raw = listing.get("expires_at", "")
+    try:
+        exp_dt  = datetime.fromisoformat(expires_raw.replace("Z", "+00:00"))
+        now_dt  = datetime.now(timezone.utc)
+        hours_left = max(0, int((exp_dt - now_dt).total_seconds() // 3600))
+        exp_str = f"{hours_left}ч"
+    except Exception:
+        exp_str = "?"
+    price = listing.get("price_coins", 0)
+    fee   = max(1, round(price * MARKET_FEE))
+    seller_gets = price - fee
+    return (
+        _card_detail_text(card) +
+        f"\n💰 *Цена:* {_fmt(price)} монет\n"
+        f"💸 *Продавец получит:* {_fmt(seller_gets)} (−5% комиссия)\n"
+        f"⏳ *Истекает через:* {exp_str}\n"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — ГЛАВНОЕ МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market$"""
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        "🛒 *Трансферный рынок*\n\n"
+        "Купи или продай игроков.\n"
+        "5% комиссия с продажи.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 Обзор рынка",   callback_data="fut_market_browse_0"),
+             InlineKeyboardButton("📋 Мои лоты",      callback_data="fut_market_my")],
+            [InlineKeyboardButton("🤝 Предложения",   callback_data="fut_trade"),
+             InlineKeyboardButton("💰 Продать карту", callback_data="fut_market_sell")],
+            [InlineKeyboardButton("◀ FUT меню",       callback_data="fut_menu")],
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — ОБЗОР ЛИСТИНГОВ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market_browse(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_browse_(\d+)$"""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    offset = int(q.data[len("fut_market_browse_"):])
+
+    raw_listings = db.get_fut_listings(limit=MARKET_PAGE, offset=offset)
+
+    # Fetch card info for each listing
+    listings: list[tuple[dict, dict]] = []
+    for lst in raw_listings:
+        card = _get_card_by_id(lst["club_id"])
+        if card:
+            listings.append((lst, card))
+
+    if not listings and offset == 0:
+        await q.edit_message_text(
+            "🛒 *Обзор рынка*\n\n_На рынке пока нет предложений._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💰 Продать карту", callback_data="fut_market_sell")],
+                [InlineKeyboardButton("◀ Назад",          callback_data="fut_market")],
+            ]),
+        )
+        return
+
+    card_btns = []
+    for lst, card in listings:
+        emoji = _card_emoji(card["rating"])
+        lbl   = f"{emoji} {_card_line(card)} — {_fmt(lst['price_coins'])} 💰"[:64]
+        card_btns.append([InlineKeyboardButton(lbl, callback_data=f"fut_market_view_{lst['id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Назад", callback_data=f"fut_market_browse_{offset - MARKET_PAGE}"))
+    if len(raw_listings) == MARKET_PAGE:
+        nav.append(InlineKeyboardButton("Вперёд ▶", callback_data=f"fut_market_browse_{offset + MARKET_PAGE}"))
+
+    kb = card_btns
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Рынок", callback_data="fut_market")])
+
+    page_num = offset // MARKET_PAGE + 1
+    await q.edit_message_text(
+        f"🛒 *Рынок* — стр. {page_num}\n_Нажми на лот для подробностей_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — ПРОСМОТР ЛОТА
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market_view(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_view_(\d+)$"""
+    q          = update.callback_query
+    await q.answer()
+    uid        = q.from_user.id
+    listing_id = int(q.data[len("fut_market_view_"):])
+
+    listing = db.get_fut_listing(listing_id)
+    if not listing or listing.get("status") != "active":
+        await q.answer("Лот не найден или снят.", show_alert=True)
+        return
+
+    card = _get_card_by_id(listing["club_id"])
+    if not card:
+        await q.answer("Карточка не найдена.", show_alert=True)
+        return
+
+    text  = _listing_card_text(card, listing)
+    price = listing["price_coins"]
+
+    if listing["seller_uid"] == uid:
+        action_row = [InlineKeyboardButton("❌ Снять с продажи", callback_data=f"fut_market_cancel_{listing_id}")]
+    else:
+        action_row = [InlineKeyboardButton(f"💳 Купить за {_fmt(price)} монет", callback_data=f"fut_market_buy_{listing_id}")]
+
+    await q.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            action_row,
+            [InlineKeyboardButton("◀ К рынку", callback_data="fut_market_browse_0")],
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — ПОКУПКА
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_buy_(\d+)$  — подтверждение покупки"""
+    q          = update.callback_query
+    await q.answer()
+    uid        = q.from_user.id
+    listing_id = int(q.data[len("fut_market_buy_"):])
+
+    listing = db.get_fut_listing(listing_id)
+    if not listing or listing.get("status") != "active":
+        await q.answer("Лот не найден.", show_alert=True)
+        return
+
+    if listing["seller_uid"] == uid:
+        await q.answer("Нельзя купить собственный лот.", show_alert=True)
+        return
+
+    card    = _get_card_by_id(listing["club_id"])
+    price   = listing["price_coins"]
+    balance = db.get_coins(uid)
+
+    card_name = _card_line(card) if card else "?"
+    await q.edit_message_text(
+        f"💳 *Подтверждение покупки*\n\n"
+        f"Карта: {card_name}\n"
+        f"Цена: *{_fmt(price)}* монет\n"
+        f"Твой баланс: *{_fmt(balance)}* монет\n\n"
+        f"{'✅ Достаточно монет' if balance >= price else '❌ Недостаточно монет'}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Купить", callback_data=f"fut_market_buy_ok_{listing_id}")] if balance >= price else [],
+            [InlineKeyboardButton("◀ Назад",  callback_data=f"fut_market_view_{listing_id}")],
+        ]),
+    )
+
+
+async def cb_fut_market_buy_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_buy_ok_(\d+)$  — выполнить покупку"""
+    q          = update.callback_query
+    await q.answer()
+    uid        = q.from_user.id
+    listing_id = int(q.data[len("fut_market_buy_ok_"):])
+
+    listing = db.get_fut_listing(listing_id)
+    if not listing or listing.get("status") != "active":
+        await q.edit_message_text(
+            "❌ Лот уже не активен.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Рынок", callback_data="fut_market")]]),
+        )
+        return
+
+    if listing["seller_uid"] == uid:
+        await q.answer("Нельзя купить собственный лот.", show_alert=True)
+        return
+
+    price     = listing["price_coins"]
+    club_id   = listing["club_id"]
+    seller_id = listing["seller_uid"]
+
+    ok, _ = db.spend_coins(uid, price)
+    if not ok:
+        await q.edit_message_text(
+            "❌ Недостаточно монет для покупки.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Рынок", callback_data="fut_market")]]),
+        )
+        return
+
+    sold = db.mark_listing_sold(listing_id)
+    if not sold:
+        # Race condition — кто-то успел купить раньше; вернём деньги
+        db.add_coins(uid, price)
+        await q.edit_message_text(
+            "❌ Лот был продан другому игроку. Монеты возвращены.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Рынок", callback_data="fut_market")]]),
+        )
+        return
+
+    _transfer_card(club_id, uid)
+
+    fee          = max(1, round(price * MARKET_FEE))
+    seller_gets  = price - fee
+    db.add_coins(seller_id, seller_gets)
+
+    card = _get_card_by_id(club_id)
+    card_name = _card_line(card) if card else "?"
+
+    # Уведомляем продавца
+    try:
+        seller_user = db.get_user(seller_id)
+        buyer_name  = q.from_user.first_name or f"User{uid}"
+        await ctx.bot.send_message(
+            chat_id=seller_id,
+            text=(
+                f"💰 *Продажа!*\n\n"
+                f"Карта *{card_name}* куплена пользователем {buyer_name}.\n"
+                f"Ты получил *{_fmt(seller_gets)}* монет (−5% комиссия)."
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+    await q.edit_message_text(
+        f"✅ *Покупка успешна!*\n\n"
+        f"Карта *{card_name}* добавлена в твой клуб.\n"
+        f"Потрачено: *{_fmt(price)}* монет.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏟 Мой клуб",  callback_data="fut_club_0_od"),
+             InlineKeyboardButton("🛒 Рынок",     callback_data="fut_market")],
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — ПРОДАЖА (выставление лота)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market_sell(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_sell$  — перенаправляем на страничный выбор"""
+    q = update.callback_query
+    q.data = "fut_market_sellp_0"
+    await cb_fut_market_sell_page(update, ctx)
+
+
+async def cb_fut_market_sell_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_sellp_(\d+)$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    offset = int(q.data[len("fut_market_sellp_"):])
+
+    # Карточки уже выставленные на рынок — исключаем
+    my_listings = db.get_my_fut_listings(uid)
+    listed_ids  = {lst["club_id"] for lst in my_listings}
+
+    all_cards = _sort_cards(_get_club_all(uid), "od")
+    available = [c for c in all_cards if c["club_id"] not in listed_ids]
+
+    if not available:
+        await q.edit_message_text(
+            "🛒 *Выставить на продажу*\n\n"
+            "_Все карточки уже выставлены на рынок или клуб пуст._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Рынок", callback_data="fut_market")]
+            ]),
+        )
+        return
+
+    total      = len(available)
+    page_cards = available[offset: offset + MARKET_PAGE]
+    pages      = (total + MARKET_PAGE - 1) // MARKET_PAGE
+    cur_page   = offset // MARKET_PAGE + 1
+
+    card_btns = []
+    for c in page_cards:
+        emoji = _card_emoji(c["rating"])
+        lbl   = f"{emoji} {_card_line(c)}"[:60]
+        card_btns.append([InlineKeyboardButton(lbl, callback_data=f"fut_market_sell_pick_{c['club_id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_market_sellp_{offset - MARKET_PAGE}"))
+    if offset + MARKET_PAGE < total:
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_market_sellp_{offset + MARKET_PAGE}"))
+
+    kb = card_btns
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Рынок", callback_data="fut_market")])
+
+    await q.edit_message_text(
+        f"💰 *Выбери карточку для продажи*\n_Стр. {cur_page}/{pages}_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_market_sell_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_sell_pick_(\d+)$"""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    club_id = int(q.data[len("fut_market_sell_pick_"):])
+
+    card = _get_card_by_id(club_id)
+    if not card:
+        await q.answer("Карточка не найдена.", show_alert=True)
+        return
+
+    db.set_pending_action(uid, "fut_market_price", {"club_id": club_id})
+
+    await q.edit_message_text(
+        f"💰 *Выставить на продажу*\n\n"
+        f"{_card_detail_text(card)}\n"
+        f"Введи цену в монетах *(минимум 100)*:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Отмена", callback_data="fut_market")]
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — МОИ ЛОТЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market_my(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_my$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    my_listings = db.get_my_fut_listings(uid)
+
+    if not my_listings:
+        await q.edit_message_text(
+            "📋 *Мои лоты*\n\n_У тебя нет активных лотов._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💰 Выставить карту", callback_data="fut_market_sell")],
+                [InlineKeyboardButton("◀ Рынок",            callback_data="fut_market")],
+            ]),
+        )
+        return
+
+    card_btns = []
+    for lst in my_listings:
+        card  = _get_card_by_id(lst["club_id"])
+        name  = _card_line(card) if card else f"Карта #{lst['club_id']}"
+        price = _fmt(lst["price_coins"])
+        card_btns.append([
+            InlineKeyboardButton(f"{name} — {price} 💰", callback_data=f"fut_market_view_{lst['id']}"),
+            InlineKeyboardButton("❌", callback_data=f"fut_market_cancel_{lst['id']}"),
+        ])
+
+    card_btns.append([InlineKeyboardButton("◀ Рынок", callback_data="fut_market")])
+
+    await q.edit_message_text(
+        f"📋 *Мои лоты* ({len(my_listings)}/{MAX_ACTIVE_LISTINGS})",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(card_btns),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТРАНСФЕРНЫЙ РЫНОК — СНЯТИЕ ЛОТА
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_market_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_cancel_(\d+)$  — подтверждение снятия"""
+    q          = update.callback_query
+    await q.answer()
+    listing_id = int(q.data[len("fut_market_cancel_"):])
+
+    await q.edit_message_text(
+        "❌ *Снять лот?*\n\nКарта вернётся в твой клуб.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да, снять",  callback_data=f"fut_market_cancel_ok_{listing_id}"),
+             InlineKeyboardButton("◀ Нет",        callback_data=f"fut_market_view_{listing_id}")],
+        ]),
+    )
+
+
+async def cb_fut_market_cancel_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_market_cancel_ok_(\d+)$"""
+    q          = update.callback_query
+    await q.answer()
+    uid        = q.from_user.id
+    listing_id = int(q.data[len("fut_market_cancel_ok_"):])
+
+    ok = db.cancel_fut_listing(listing_id, uid)
+    if ok:
+        await q.edit_message_text(
+            "✅ Лот снят с рынка. Карта в твоём клубе.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Мои лоты", callback_data="fut_market_my"),
+                 InlineKeyboardButton("◀ Рынок",    callback_data="fut_market")],
+            ]),
+        )
+    else:
+        await q.edit_message_text(
+            "❌ Не удалось снять лот (уже продан или не твой).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Рынок", callback_data="fut_market")]]),
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТОРГОВЫЕ ПРЕДЛОЖЕНИЯ — УТИЛИТЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _show_trade_builder(uid: int, data: dict, q, ctx) -> None:
+    """Отображает текущее состояние строящегося предложения."""
+    to_name       = data.get("to_name", "?")
+    offer_ids     = data.get("offer_club_ids", [])
+    offer_coins   = data.get("offer_coins", 0)
+
+    card_lines = []
+    for cid in offer_ids:
+        card = _get_card_by_id(cid)
+        if card:
+            card_lines.append(f"• {_card_line(card)}")
+        else:
+            card_lines.append(f"• Карта #{cid}")
+
+    cards_str = "\n".join(card_lines) if card_lines else "• Нет карточек"
+
+    text = (
+        f"🤝 *Новое предложение → {to_name}*\n\n"
+        f"Ты предлагаешь:\n{cards_str}\n"
+        f"• {_fmt(offer_coins)} 💰\n"
+    )
+
+    can_send = bool(offer_ids) or offer_coins > 0
+
+    kb = [
+        [InlineKeyboardButton("➕ Добавить карточку", callback_data="fut_trade_addcard_0"),
+         InlineKeyboardButton("💰 Монеты",            callback_data="fut_trade_setcoins")],
+        [InlineKeyboardButton("📤 Отправить",         callback_data="fut_trade_send")] if can_send else [],
+        [InlineKeyboardButton("❌ Отмена",             callback_data="fut_trade_cancel_build")],
+    ]
+    kb = [row for row in kb if row]
+
+    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТОРГОВЫЕ ПРЕДЛОЖЕНИЯ — МЕНЮ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_trade(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    incoming = db.get_incoming_trade_offers(uid)
+    n_in     = len(incoming)
+
+    await q.edit_message_text(
+        "🤝 *Прямые предложения*\n\n"
+        "Предложи сделку любому игроку.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Новое предложение", callback_data="fut_trade_new")],
+            [InlineKeyboardButton(f"📥 Входящие ({n_in})", callback_data="fut_trade_inbox"),
+             InlineKeyboardButton("📨 Исходящие",          callback_data="fut_trade_outbox")],
+            [InlineKeyboardButton("◀ Рынок",               callback_data="fut_market")],
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТОРГОВЫЕ ПРЕДЛОЖЕНИЯ — СОЗДАНИЕ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_trade_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_new$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    db.set_pending_action(uid, "fut_trade_who", {})
+    await q.edit_message_text(
+        "🤝 *Новое предложение*\n\n"
+        "Введи @username или ID игрока, которому хочешь предложить сделку:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Отмена", callback_data="fut_trade")]
+        ]),
+    )
+
+
+async def cb_fut_trade_addcard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_addcard_(\d+)$"""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    offset = int(q.data[len("fut_trade_addcard_"):])
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_trade_build":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    data      = pending.get("data", {})
+    offer_ids = set(data.get("offer_club_ids", []))
+
+    all_cards = _sort_cards(_get_club_all(uid), "od")
+    available = [c for c in all_cards if c["club_id"] not in offer_ids]
+    total     = len(available)
+    page_cards = available[offset: offset + MARKET_PAGE]
+
+    card_btns = []
+    for c in page_cards:
+        emoji = _card_emoji(c["rating"])
+        lbl   = f"{emoji} {_card_line(c)}"[:60]
+        card_btns.append([InlineKeyboardButton(lbl, callback_data=f"fut_trade_togglecard_{c['club_id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_trade_addcard_{offset - MARKET_PAGE}"))
+    if offset + MARKET_PAGE < total:
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_trade_addcard_{offset + MARKET_PAGE}"))
+
+    kb = card_btns
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Назад к предложению", callback_data="fut_trade_builder")])
+
+    await q.edit_message_text(
+        f"➕ *Выбери карточку для предложения*\n"
+        f"_(Максимум {MAX_CARDS_PER_OFFER} карт)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_trade_togglecard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_togglecard_(\d+)$"""
+    q       = update.callback_query
+    uid     = q.from_user.id
+    club_id = int(q.data[len("fut_trade_togglecard_"):])
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_trade_build":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    data      = pending.get("data", {})
+    offer_ids = list(data.get("offer_club_ids", []))
+
+    if club_id in offer_ids:
+        offer_ids.remove(club_id)
+        await q.answer("Карточка убрана из предложения.")
+    else:
+        if len(offer_ids) >= MAX_CARDS_PER_OFFER:
+            await q.answer(f"Максимум {MAX_CARDS_PER_OFFER} карт в предложении.", show_alert=True)
+            return
+        offer_ids.append(club_id)
+        await q.answer("Карточка добавлена в предложение.")
+
+    data["offer_club_ids"] = offer_ids
+    db.set_pending_action(uid, "fut_trade_build", data)
+    await _show_trade_builder(uid, data, q, ctx)
+
+
+async def cb_fut_trade_builder(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_builder$  — вернуться к построителю"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_trade_build":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+    await _show_trade_builder(uid, pending.get("data", {}), q, ctx)
+
+
+async def cb_fut_trade_setcoins(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_setcoins$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_trade_build":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    # сохраняем текущие данные предложения, переходим к вводу монет
+    build_data = pending.get("data", {})
+    db.set_pending_action(uid, "fut_trade_coins", build_data)
+
+    balance = db.get_coins(uid)
+    await q.edit_message_text(
+        f"💰 *Монеты в предложении*\n\n"
+        f"Твой баланс: *{_fmt(balance)}* монет\n"
+        f"Введи количество монет (0 — без монет):",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Отмена", callback_data="fut_trade_builder")]
+        ]),
+    )
+
+
+async def cb_fut_trade_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_send$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    pending = db.get_pending_action(uid)
+    if not pending or pending.get("action") != "fut_trade_build":
+        await q.answer("Сессия истекла.", show_alert=True)
+        return
+
+    data        = pending.get("data", {})
+    to_uid      = data.get("to_uid")
+    to_name     = data.get("to_name", "?")
+    offer_ids   = data.get("offer_club_ids", [])
+    offer_coins = data.get("offer_coins", 0)
+
+    if not offer_ids and offer_coins <= 0:
+        await q.answer("Предложение пустое — добавь карточки или монеты.", show_alert=True)
+        return
+
+    # Проверяем баланс если в предложении есть монеты
+    if offer_coins > 0:
+        balance = db.get_coins(uid)
+        if balance < offer_coins:
+            await q.answer("Недостаточно монет.", show_alert=True)
+            return
+
+    db.create_trade_offer(
+        from_uid=uid, to_uid=to_uid,
+        offer_club_ids=offer_ids, offer_coins=offer_coins,
+        want_club_ids=[], want_coins=0,
+    )
+    db.clear_pending_action(uid)
+
+    my_name = q.from_user.first_name or f"User{uid}"
+    try:
+        await ctx.bot.send_message(
+            chat_id=to_uid,
+            text=(
+                f"📬 *Новое предложение от {my_name}!*\n\n"
+                f"Зайди в FUT → 🛒 Рынок → 🤝 Предложения, чтобы посмотреть."
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+    await q.edit_message_text(
+        f"✅ *Предложение отправлено {to_name}!*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ Рынок", callback_data="fut_market")]
+        ]),
+    )
+
+
+async def cb_fut_trade_cancel_build(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_cancel_build$  — отмена построителя"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    db.clear_pending_action(uid)
+    q.data = "fut_trade"
+    await cb_fut_trade(update, ctx)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТОРГОВЫЕ ПРЕДЛОЖЕНИЯ — ВХОДЯЩИЕ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_trade_inbox(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_inbox$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    offers = db.get_incoming_trade_offers(uid)
+
+    if not offers:
+        await q.edit_message_text(
+            "📥 *Входящие предложения*\n\n_Нет новых предложений._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_trade")]
+            ]),
+        )
+        return
+
+    rows = []
+    for offer in offers:
+        from_user = db.get_user(offer["from_uid"])
+        from_name = (from_user or {}).get("display_name") or f"User{offer['from_uid']}"
+        n_cards   = len(offer.get("offer_club_ids") or [])
+        coins     = offer.get("offer_coins", 0)
+        summary   = f"{n_cards} карт" + (f" + {_fmt(coins)} 💰" if coins else "")
+        rows.append([InlineKeyboardButton(
+            f"{from_name[:16]}: {summary}",
+            callback_data=f"fut_trade_view_{offer['id']}",
+        )])
+
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data="fut_trade")])
+
+    await q.edit_message_text(
+        f"📥 *Входящие предложения* ({len(offers)})",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_fut_trade_view(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_view_(\d+)$"""
+    q        = update.callback_query
+    await q.answer()
+    uid      = q.from_user.id
+    offer_id = int(q.data[len("fut_trade_view_"):])
+
+    offer = db.get_trade_offer(offer_id)
+    if not offer:
+        await q.answer("Предложение не найдено.", show_alert=True)
+        return
+
+    from_user = db.get_user(offer["from_uid"])
+    from_name = (from_user or {}).get("display_name") or f"User{offer['from_uid']}"
+    offer_ids = offer.get("offer_club_ids") or []
+    coins     = offer.get("offer_coins", 0)
+
+    card_lines = []
+    for cid in offer_ids:
+        card = _get_card_by_id(cid)
+        if card:
+            card_lines.append(f"• {_card_line(card)}")
+
+    cards_str = "\n".join(card_lines) if card_lines else "• Нет карточек"
+
+    text = (
+        f"🤝 *Предложение от {from_name}*\n\n"
+        f"Предлагает:\n{cards_str}\n"
+        f"• {_fmt(coins)} 💰\n"
+    )
+
+    is_receiver = (offer.get("to_uid") == uid)
+    status      = offer.get("status", "")
+
+    if is_receiver and status == "pending":
+        kb = [
+            [InlineKeyboardButton("✅ Принять",   callback_data=f"fut_trade_accept_{offer_id}"),
+             InlineKeyboardButton("❌ Отклонить", callback_data=f"fut_trade_decline_{offer_id}")],
+            [InlineKeyboardButton("◀ Назад",      callback_data="fut_trade_inbox")],
+        ]
+    else:
+        kb = [[InlineKeyboardButton("◀ Назад", callback_data="fut_trade_inbox")]]
+
+    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_trade_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_accept_(\d+)$"""
+    q        = update.callback_query
+    await q.answer()
+    uid      = q.from_user.id
+    offer_id = int(q.data[len("fut_trade_accept_"):])
+
+    offer = db.get_trade_offer(offer_id)
+    if not offer or offer.get("status") != "pending":
+        await q.edit_message_text(
+            "❌ Предложение уже не активно.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Назад", callback_data="fut_trade")]]),
+        )
+        return
+
+    if offer.get("to_uid") != uid:
+        await q.answer("Это предложение не для тебя.", show_alert=True)
+        return
+
+    from_uid  = offer["from_uid"]
+    offer_ids = offer.get("offer_club_ids") or []
+    coins     = offer.get("offer_coins", 0)
+
+    # Проверяем баланс у отправителя
+    if coins > 0:
+        ok, _ = db.spend_coins(from_uid, coins)
+        if not ok:
+            await q.edit_message_text(
+                "❌ У отправителя недостаточно монет для сделки.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀ Назад", callback_data="fut_trade")]]),
+            )
+            return
+        db.add_coins(uid, coins)
+
+    # Переносим карточки от from_uid → uid
+    for cid in offer_ids:
+        _transfer_card(cid, uid)
+
+    db.mark_trade_offer_accepted(offer_id, uid)
+
+    my_name = q.from_user.first_name or f"User{uid}"
+    try:
+        await ctx.bot.send_message(
+            chat_id=from_uid,
+            text=f"✅ *{my_name}* принял твоё торговое предложение!",
+            parse_mode="Markdown",
+        )
+    except Exception:
+        pass
+
+    await q.edit_message_text(
+        "✅ *Предложение принято!* Карточки перешли в твой клуб.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏟 Мой клуб", callback_data="fut_club_0_od"),
+             InlineKeyboardButton("◀ Рынок",     callback_data="fut_market")],
+        ]),
+    )
+
+
+async def cb_fut_trade_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_decline_(\d+)$"""
+    q        = update.callback_query
+    await q.answer()
+    uid      = q.from_user.id
+    offer_id = int(q.data[len("fut_trade_decline_"):])
+
+    ok = db.decline_trade_offer(offer_id, uid)
+    msg = "✅ Предложение отклонено." if ok else "❌ Не удалось отклонить предложение."
+
+    await q.edit_message_text(
+        msg,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ Входящие", callback_data="fut_trade_inbox")]
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТОРГОВЫЕ ПРЕДЛОЖЕНИЯ — ИСХОДЯЩИЕ
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cb_fut_trade_outbox(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_outbox$"""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    offers = db.get_outgoing_trade_offers(uid)
+
+    if not offers:
+        await q.edit_message_text(
+            "📨 *Исходящие предложения*\n\n_Нет активных предложений._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀ Назад", callback_data="fut_trade")]
+            ]),
+        )
+        return
+
+    rows = []
+    for offer in offers:
+        to_user  = db.get_user(offer["to_uid"])
+        to_name  = (to_user or {}).get("display_name") or f"User{offer['to_uid']}"
+        n_cards  = len(offer.get("offer_club_ids") or [])
+        coins    = offer.get("offer_coins", 0)
+        summary  = f"{n_cards} карт" + (f" + {_fmt(coins)} 💰" if coins else "")
+        rows.append([
+            InlineKeyboardButton(f"→ {to_name[:16]}: {summary}", callback_data=f"fut_trade_view_{offer['id']}"),
+            InlineKeyboardButton("❌", callback_data=f"fut_trade_cancel_{offer['id']}"),
+        ])
+
+    rows.append([InlineKeyboardButton("◀ Назад", callback_data="fut_trade")])
+
+    await q.edit_message_text(
+        f"📨 *Исходящие предложения* ({len(offers)})",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_fut_trade_cancel_offer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_trade_cancel_(\d+)$  — отменить исходящее предложение"""
+    q        = update.callback_query
+    await q.answer()
+    uid      = q.from_user.id
+    offer_id = int(q.data[len("fut_trade_cancel_"):])
+
+    ok  = db.cancel_trade_offer(offer_id, uid)
+    msg = "✅ Предложение отменено." if ok else "❌ Не удалось отменить."
+
+    await q.edit_message_text(
+        msg,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀ Исходящие", callback_data="fut_trade_outbox")]
+        ]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ТЕКСТОВЫЙ ХЕНДЛЕР — ввод цены/получателя/монет (pending_action)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Вызывается из основного text-хендлера бота.
+    Возвращает True если обработал, False если не наш pending_action.
+    """
+    uid     = update.effective_user.id
+    text    = (update.message.text or "").strip()
+    pending = db.get_pending_action(uid)
+    if not pending:
+        return False
+
+    action = pending.get("action")
+
+    # ── Ввод цены для листинга ────────────────────────────────────────────────
+    if action == "fut_market_price":
+        data    = pending.get("data", {})
+        club_id = data.get("club_id")
+
+        try:
+            price = int(text.replace(" ", "").replace(",", ""))
+        except ValueError:
+            await update.message.reply_text("❌ Введи целое число, например: 5000")
+            return True
+
+        if price < 100:
+            await update.message.reply_text("❌ Минимальная цена — 100 монет.")
+            return True
+
+        # Проверяем лимит листингов
+        my_listings = db.get_my_fut_listings(uid)
+        if len(my_listings) >= MAX_ACTIVE_LISTINGS:
+            await update.message.reply_text(
+                f"❌ Максимум {MAX_ACTIVE_LISTINGS} активных лотов. Сначала сними один."
+            )
+            db.clear_pending_action(uid)
+            return True
+
+        # Проверяем не выставлена ли эта карточка уже
+        if any(lst["club_id"] == club_id for lst in my_listings):
+            await update.message.reply_text("❌ Эта карточка уже выставлена на продажу.")
+            db.clear_pending_action(uid)
+            return True
+
+        db.create_fut_listing(uid, club_id, price)
+        db.clear_pending_action(uid)
+
+        card     = _get_card_by_id(club_id)
+        card_name = _card_line(card) if card else f"Карта #{club_id}"
+
+        await update.message.reply_text(
+            f"✅ Карта *{card_name}* выставлена за *{_fmt(price)} монет*!\n"
+            f"Лот активен 48 часов.",
+            parse_mode="Markdown",
+        )
+        return True
+
+    # ── Ввод получателя предложения ───────────────────────────────────────────
+    if action == "fut_trade_who":
+        # Пробуем как int (user_id) или @username
+        target_user = None
+        if text.lstrip("@").isdigit():
+            target_user = db.get_user(int(text.lstrip("@")))
+        else:
+            target_user = db.get_user_by_username(text)
+
+        if not target_user:
+            await update.message.reply_text(
+                "❌ Игрок не найден. Попробуй ввести @username или числовой ID."
+            )
+            return True
+
+        to_uid  = target_user["user_id"]
+        to_name = target_user.get("display_name") or target_user.get("username") or f"User{to_uid}"
+
+        if to_uid == uid:
+            await update.message.reply_text("❌ Нельзя отправить предложение самому себе.")
+            return True
+
+        build_data = {
+            "to_uid":         to_uid,
+            "to_name":        to_name,
+            "offer_club_ids": [],
+            "offer_coins":    0,
+        }
+        db.set_pending_action(uid, "fut_trade_build", build_data)
+
+        # Отправляем построитель через reply-сообщение
+        await update.message.reply_text(
+            f"🤝 *Новое предложение → {to_name}*\n\n"
+            f"Ты предлагаешь:\n• Нет карточек\n• 0 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Добавить карточку", callback_data="fut_trade_addcard_0"),
+                 InlineKeyboardButton("💰 Монеты",            callback_data="fut_trade_setcoins")],
+                [InlineKeyboardButton("❌ Отмена",             callback_data="fut_trade_cancel_build")],
+            ]),
+        )
+        return True
+
+    # ── Ввод монет для предложения ────────────────────────────────────────────
+    if action == "fut_trade_coins":
+        build_data = pending.get("data", {})
+
+        try:
+            coins = int(text.replace(" ", "").replace(",", ""))
+        except ValueError:
+            await update.message.reply_text("❌ Введи целое число >= 0")
+            return True
+
+        if coins < 0:
+            await update.message.reply_text("❌ Количество монет не может быть отрицательным.")
+            return True
+
+        if coins > 0:
+            balance = db.get_coins(uid)
+            if balance < coins:
+                await update.message.reply_text(
+                    f"❌ Недостаточно монет. Баланс: {_fmt(balance)} 💰"
+                )
+                return True
+
+        build_data["offer_coins"] = coins
+        db.set_pending_action(uid, "fut_trade_build", build_data)
+
+        to_name  = build_data.get("to_name", "?")
+        offer_ids = build_data.get("offer_club_ids", [])
+        card_lines = []
+        for cid in offer_ids:
+            card = _get_card_by_id(cid)
+            if card:
+                card_lines.append(f"• {_card_line(card)}")
+        cards_str = "\n".join(card_lines) if card_lines else "• Нет карточек"
+
+        can_send = bool(offer_ids) or coins > 0
+        kb = [
+            [InlineKeyboardButton("➕ Добавить карточку", callback_data="fut_trade_addcard_0"),
+             InlineKeyboardButton("💰 Монеты",            callback_data="fut_trade_setcoins")],
+            [InlineKeyboardButton("📤 Отправить",         callback_data="fut_trade_send")] if can_send else [],
+            [InlineKeyboardButton("❌ Отмена",             callback_data="fut_trade_cancel_build")],
+        ]
+        kb = [row for row in kb if row]
+
+        await update.message.reply_text(
+            f"🤝 *Новое предложение → {to_name}*\n\n"
+            f"Ты предлагаешь:\n{cards_str}\n"
+            f"• {_fmt(coins)} 💰",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb),
+        )
+        return True
+
+    return False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  REGISTRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def fut_handlers() -> list[tuple[str, Any]]:
     return [
         # Меню и паки
-        ("^fut_menu$",            cb_fut_menu),
-        ("^fut_packs$",           cb_fut_packs),
-        ("^fut_buy_",             cb_fut_buy),
-        ("^fut_no_coins$",        cb_fut_no_coins),
+        ("^fut_menu$",                    cb_fut_menu),
+        ("^fut_packs$",                   cb_fut_packs),
+        ("^fut_buy_",                     cb_fut_buy),
+        ("^fut_no_coins$",                cb_fut_no_coins),
         # Клуб
-        ("^fut_sell_confirm_",    cb_fut_sell_confirm),
-        ("^fut_card_",            cb_fut_card),
-        ("^fut_sell_dupes$",      cb_fut_sell_dupes),
-        ("^fut_club_",            cb_fut_club),
+        ("^fut_sell_confirm_",            cb_fut_sell_confirm),
+        ("^fut_card_",                    cb_fut_card),
+        ("^fut_sell_dupes$",              cb_fut_sell_dupes),
+        ("^fut_club_",                    cb_fut_club),
         # Команда (специфичные — до общего fut_team$)
-        ("^fut_team_setform_",    cb_fut_team_setform),
-        ("^fut_team_remove_",     cb_fut_team_remove),
-        ("^fut_team_slot_",       cb_fut_team_slot),
-        ("^fut_team_pick_",       cb_fut_team_pick),
-        ("^fut_team_form$",       cb_fut_team_form),
-        ("^fut_team$",            cb_fut_team),
+        ("^fut_team_setform_",            cb_fut_team_setform),
+        ("^fut_team_remove_",             cb_fut_team_remove),
+        ("^fut_team_slot_",               cb_fut_team_slot),
+        ("^fut_team_pick_",               cb_fut_team_pick),
+        ("^fut_team_form$",               cb_fut_team_form),
+        ("^fut_team$",                    cb_fut_team),
         # Матчи (специфичные — до общего fut_match)
-        ("^fut_int_",             cb_fut_interact),      # интерактивный выбор (до fut_match)
-        ("^fut_challenge_",       cb_fut_challenge),
-        ("^fut_send_",            cb_fut_send),
-        ("^fut_accept_",          cb_fut_accept),
-        ("^fut_decline_",         cb_fut_decline),
-        ("^fut_match_history$",   cb_fut_match_history),
-        ("^fut_match$",           cb_fut_match),
+        ("^fut_int_",                     cb_fut_interact),      # интерактивный выбор (до fut_match)
+        ("^fut_challenge_",               cb_fut_challenge),
+        ("^fut_send_",                    cb_fut_send),
+        ("^fut_accept_",                  cb_fut_accept),
+        ("^fut_decline_",                 cb_fut_decline),
+        ("^fut_match_history$",           cb_fut_match_history),
+        ("^fut_match$",                   cb_fut_match),
+        # ── Рынок (специфичные — до fut_market$) ──────────────────────────────
+        ("^fut_market_browse_",           cb_fut_market_browse),
+        ("^fut_market_buy_ok_",           cb_fut_market_buy_ok),
+        ("^fut_market_buy_",              cb_fut_market_buy),
+        ("^fut_market_cancel_ok_",        cb_fut_market_cancel_ok),
+        ("^fut_market_cancel_",           cb_fut_market_cancel),
+        ("^fut_market_view_",             cb_fut_market_view),
+        ("^fut_market_sell_pick_",        cb_fut_market_sell_pick),
+        ("^fut_market_sellp_",            cb_fut_market_sell_page),
+        ("^fut_market_sell$",             cb_fut_market_sell),
+        ("^fut_market_my$",               cb_fut_market_my),
+        ("^fut_market$",                  cb_fut_market),
+        # ── Торговые предложения ───────────────────────────────────────────────
+        ("^fut_trade_cancel_build$",      cb_fut_trade_cancel_build),
+        ("^fut_trade_cancel_",            cb_fut_trade_cancel_offer),
+        ("^fut_trade_togglecard_",        cb_fut_trade_togglecard),
+        ("^fut_trade_addcard_",           cb_fut_trade_addcard),
+        ("^fut_trade_builder$",           cb_fut_trade_builder),
+        ("^fut_trade_setcoins$",          cb_fut_trade_setcoins),
+        ("^fut_trade_send$",              cb_fut_trade_send),
+        ("^fut_trade_accept_",            cb_fut_trade_accept),
+        ("^fut_trade_decline_",           cb_fut_trade_decline),
+        ("^fut_trade_view_",              cb_fut_trade_view),
+        ("^fut_trade_inbox$",             cb_fut_trade_inbox),
+        ("^fut_trade_outbox$",            cb_fut_trade_outbox),
+        ("^fut_trade_new$",               cb_fut_trade_new),
+        ("^fut_trade$",                   cb_fut_trade),
     ]
