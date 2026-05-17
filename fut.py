@@ -1188,6 +1188,39 @@ _pending_interactions: dict[int, asyncio.Event] = {}
 _interaction_choices:  dict[int, str]           = {}
 
 
+class _MatchMoment:
+    """Координирует выбор двух игроков в один интерактивный момент."""
+    def __init__(self, moment_type: str, attacker_uid: int, keeper_uid: int):
+        self.type         = moment_type
+        self.attacker_uid = attacker_uid
+        self.keeper_uid   = keeper_uid
+        self._att_choice: str | None = None
+        self._kpr_choice: str | None = None
+        self._ready       = asyncio.Event()
+
+    def submit(self, uid: int, choice: str) -> None:
+        if uid == self.attacker_uid:
+            self._att_choice = choice
+        else:
+            self._kpr_choice = choice
+        if self._att_choice and self._kpr_choice:
+            self._ready.set()
+
+    async def wait_result(self, timeout: float = 35.0) -> dict:
+        """Ждём пока оба сделают выбор. Авто-заполняем при таймауте."""
+        try:
+            await asyncio.wait_for(asyncio.shield(self._ready.wait()), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+        if not self._att_choice:
+            self._att_choice = random.choice(["left", "center", "right", "shot", "top"])
+        if not self._kpr_choice:
+            self._kpr_choice = random.choice(["left", "center", "right", "attack", "up"])
+        return {"att": self._att_choice, "kpr": self._kpr_choice}
+
+_match_moments: dict[str, "_MatchMoment"] = {}
+
+
 def _get_fut_rating(user_id: int) -> int:
     u = db.get_user(user_id)
     return (u or {}).get("fut_rating", 0) or 0
@@ -1587,9 +1620,23 @@ async def _wait_interaction(user_id: int, timeout: float = 30.0) -> str | None:
 
 async def cb_fut_interact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Принимает выбор игрока в интерактивный момент. fut_int_{choice}"""
-    q   = update.callback_query
-    uid = q.from_user.id
+    q      = update.callback_query
+    uid    = q.from_user.id
     choice = q.data[len("fut_int_"):]
+
+    # Сначала проверяем shared матч-момент
+    for moment in list(_match_moments.values()):
+        if uid in (moment.attacker_uid, moment.keeper_uid) and not moment._ready.is_set():
+            moment.submit(uid, choice)
+            # Также сигналим _wait_interaction если есть
+            evt = _pending_interactions.get(uid)
+            if evt and not evt.is_set():
+                _interaction_choices[uid] = choice
+                evt.set()
+            await q.answer("✅ Выбор сделан!")
+            return
+
+    # Fallback: индивидуальный момент
     evt = _pending_interactions.get(uid)
     if evt and not evt.is_set():
         _interaction_choices[uid] = choice
@@ -1606,14 +1653,14 @@ async def cb_fut_interact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 async def _run_match_animation(
     bot, chat_id: int, message_id: int | None,
     my_name: str, opp_name: str,
-    my_uid: int,        # нужен для ожидания интерактивного выбора
-    sa: dict,           # сила моей команды (для расчёта шансов в мини-игре)
-    stats: dict,        # результат _simulate_match (с точки зрения "моей" команды = A)
+    my_uid: int,
+    stats: dict,
     r_delta: int, coins: int,
+    shared_moments: list[dict] | None = None,
 ) -> None:
-    """Анимирует матч в двух таймах по 45 мин с живыми событиями и интерактивными моментами."""
+    """Анимирует матч с синхронизированными интерактивными моментами."""
 
-    sent_id = message_id  # если None — сначала шлём новым сообщением
+    sent_id = message_id
 
     async def _show(text: str, kb=None):
         nonlocal sent_id
@@ -1632,89 +1679,99 @@ async def _run_match_animation(
         except Exception:
             pass
 
-    # ── Интерактивный момент ─────────────────────────────────────────────────
-    async def _interactive(moment_type: str, minute: int) -> int:
-        """Показывает мини-игру, ждёт выбор. Возвращает бонусные монеты."""
-        OPTS = {
-            "penalty": [
-                ("↖️ Лево",   "left"),
-                ("⬆️ Центр",  "center"),
-                ("↗️ Право",  "right"),
-            ],
-            "1v1": [
-                ("⚡ Удар",    "shot"),
-                ("🎯 Обводка", "dribble"),
-                ("🔙 Пас",     "pass"),
-            ],
-            "freekick": [
-                ("⬆️ Верхний угол", "top"),
-                ("⬇️ Нижний угол",  "bottom"),
-                ("🛡 В стенку",      "wall"),
-            ],
+    # ── Интерактивный момент (синхронизированный с соперником) ────────────────
+    async def _interactive_shared(moment_cfg: dict) -> int:
+        moment: _MatchMoment = _match_moments.get(moment_cfg["moment_id"])
+        if not moment:
+            return 0
+
+        mtype        = moment_cfg["type"]
+        minute       = moment_cfg["minute"]
+        is_attacker  = (my_uid == moment.attacker_uid)
+
+        ATT_OPTS = {
+            "penalty":  [("↖️ Лево", "left"), ("⬆️ Центр", "center"), ("↗️ Право", "right")],
+            "1v1":      [("⚡ Удар", "shot"), ("🎯 Обводка", "dribble")],
+            "freekick": [("⬆️ Верхний угол", "top"), ("⬇️ Нижний угол", "bottom")],
         }
-        INTROS = {
-            "penalty":  f"🟡 *{minute}'* — *ПЕНАЛЬТИ!*\n\nВыбирай угол удара!\n⏱ _30 секунд на выбор_",
-            "1v1":      f"🔥 *{minute}'* — *ВЫХОД ОДИН НА ОДИН!*\n\nЧто делаешь?\n⏱ _30 секунд на выбор_",
-            "freekick": f"⚡ *{minute}'* — *ШТРАФНОЙ!*\n\nКуда бьёшь?\n⏱ _30 секунд на выбор_",
+        KPR_OPTS = {
+            "penalty":  [("↖️ Лево", "left"), ("⬆️ Центр", "center"), ("↗️ Право", "right")],
+            "1v1":      [("⚡ Атаковать", "attack"), ("🧤 В ворота", "stay")],
+            "freekick": [("⬆️ Прыгаю вверх", "up"), ("⬇️ Прыгаю вниз", "down")],
         }
-        opts = OPTS[moment_type]
-        kb   = InlineKeyboardMarkup([[
+        ATT_PROMPT = {
+            "penalty":  f"🟡 *{minute}'* — *ПЕНАЛЬТИ!*\n\nВыбирай угол удара!\n⏱ _30 секунд_",
+            "1v1":      f"🔥 *{minute}'* — *ВЫХОД ОДИН НА ОДИН!*\n\nЧто делаешь?\n⏱ _30 секунд_",
+            "freekick": f"⚡ *{minute}'* — *ШТРАФНОЙ!*\n\nКуда бьёшь?\n⏱ _30 секунд_",
+        }
+        KPR_PROMPT = {
+            "penalty":  f"🟡 *{minute}'* — *Соперник бьёт пенальти!*\n\nКуда прыгает твой вратарь?\n⏱ _30 секунд_",
+            "1v1":      f"🔥 *{minute}'* — *Соперник выходит один на один!*\n\nДействия вратаря?\n⏱ _30 секунд_",
+            "freekick": f"⚡ *{minute}'* — *Соперник бьёт штрафной!*\n\nКуда прыгаешь?\n⏱ _30 секунд_",
+        }
+
+        opts = ATT_OPTS[mtype] if is_attacker else KPR_OPTS[mtype]
+        prompt = ATT_PROMPT[mtype] if is_attacker else KPR_PROMPT[mtype]
+
+        kb = InlineKeyboardMarkup([[
             InlineKeyboardButton(lbl, callback_data=f"fut_int_{val}") for lbl, val in opts
         ]])
-        await _show(INTROS[moment_type], kb=kb)
+        await _show(prompt, kb=kb)
 
+        # Ждём свой выбор (30с)
         choice = await _wait_interaction(my_uid, timeout=30.0)
         auto   = choice is None
         if auto:
             choice = random.choice([v for _, v in opts])
+        moment.submit(my_uid, choice)
+
+        # Ждём пока соперник тоже выберет (максимум 5с, потом авто)
+        result = await moment.wait_result(timeout=5.0)
+        att_c  = result["att"]
+        kpr_c  = result["kpr"]
+
+        # Вычисляем исход
+        if mtype == "penalty":
+            goal = random.random() < (0.85 if att_c != kpr_c else 0.18)
+        elif mtype == "1v1":
+            if att_c == "shot":
+                goal = random.random() < (0.70 if kpr_c == "attack" else 0.45)
+            else:  # dribble
+                goal = random.random() < (0.65 if kpr_c == "stay" else 0.30)
+        else:  # freekick
+            match_dir = (att_c == "top" and kpr_c == "up") or (att_c == "bottom" and kpr_c == "down")
+            goal = random.random() < (0.20 if match_dir else 0.55)
 
         auto_tag = " _(авто)_" if auto else ""
 
-        # Вычисляем исход мини-игры
-        if moment_type == "penalty":
-            keeper_dive = random.choice(["left", "center", "right"])
-            goal = random.random() < (0.85 if choice != keeper_dive else 0.18)
-        elif moment_type == "1v1":
-            if choice == "shot":
-                goal = random.random() < 0.55
-            elif choice == "dribble":
-                goal = random.random() < (0.72 if sa.get("ovr", 70) >= 80 else 0.38)
-            else:   # pass
-                goal = False
-        else:       # freekick
-            goal = False if choice == "wall" else random.random() < 0.42
-
         if goal:
-            bonus = 150 if moment_type == "penalty" else 100
-            await _show(
-                f"⚽ *ГОЛ!*{auto_tag}\n\n"
-                f"🔵 *{my_name}* реализует момент!\n\n"
-                f"💰 Бонус за мастерство: *+{bonus}* монет!"
-            )
-        else:
-            if moment_type == "penalty":
-                fail_txt = "🧤 Вратарь угадал угол! Без гола."
-            elif choice == "pass":
-                fail_txt = "🔙 Откат назад — момент упущен."
-            elif choice == "wall":
-                fail_txt = "🛡 В стенку! Сорвали атаку."
+            bonus = 150 if mtype == "penalty" else 100
+            if is_attacker:
+                result_txt = f"⚽ *ГОЛ!*{auto_tag}\n\n🔵 *{my_name}* реализует момент!\n💰 Бонус: *+{bonus}* монет!"
             else:
-                fail_txt = random.choice([
-                    "💨 Мимо ворот!", "🏹 В штангу!", "🧤 Сейв!", "❌ Не хватило точности!",
-                ])
-            bonus = 0
-            await _show(f"❌ *Не получилось!*{auto_tag}\n\n{fail_txt}")
+                result_txt = f"😤 *Вратарь пропустил*{auto_tag}\n\nСоперник забил..."
+                bonus = 0
+        else:
+            if is_attacker:
+                if mtype == "penalty":
+                    fail = "Вратарь угадал угол!" if att_c == kpr_c else "Мимо ворот!"
+                else:
+                    fail = random.choice(["💨 Мимо!", "🧤 Сейв вратаря!", "🏹 В штангу!"])
+                result_txt = f"❌ *Не получилось!*{auto_tag}\n\n{fail}"
+                bonus = 0
+            else:
+                bonus = 100
+                result_txt = f"🧤 *Сейв вратаря!*{auto_tag}\n\n🔵 *{my_name}* отбивает удар!\n💰 Бонус: *+{bonus}* монет!"
 
+        await _show(result_txt)
         await asyncio.sleep(2.5)
         return bonus
 
-    # ── Решаем, будут ли интерактивные моменты ────────────────────────────────
+    # ── Разбиваем shared_moments по таймам ────────────────────────────────────
+    moments = shared_moments or []
+    h1_moments = [m for m in moments if m.get("half") == 1]
+    h2_moments = [m for m in moments if m.get("half") == 2]
     bonus_total = 0
-    moment_pool = ["penalty", "1v1", "freekick"]
-    h1_moment_type = random.choice(moment_pool) if random.random() < 0.42 else None
-    h2_moment_type = random.choice(moment_pool) if random.random() < 0.42 else None
-    h1_moment_min  = random.randint(30, 42)
-    h2_moment_min  = random.randint(58, 72)
 
     score_a   = stats["score_a"]
     score_b   = stats["score_b"]
@@ -1752,9 +1809,9 @@ async def _run_match_animation(
     )
     await asyncio.sleep(2.0)
 
-    # ── Интерактив 1-го тайма (~30-42') ───────────────────────────────────────
-    if h1_moment_type:
-        bonus_total += await _interactive(h1_moment_type, h1_moment_min)
+    # ── Интерактив 1-го тайма ─────────────────────────────────────────────────
+    for m_cfg in h1_moments:
+        bonus_total += await _interactive_shared(m_cfg)
 
     # ── 1-й тайм — 40' ─────────────────────────────────────────────────────────
     late_h1 = [(m, t) for m, t in h1_events if 25 < m <= 45]
@@ -1800,9 +1857,9 @@ async def _run_match_animation(
         )
         await asyncio.sleep(2.0)
 
-    # ── Интерактив 2-го тайма (~58-72') ───────────────────────────────────────
-    if h2_moment_type:
-        bonus_total += await _interactive(h2_moment_type, h2_moment_min)
+    # ── Интерактив 2-го тайма ─────────────────────────────────────────────────
+    for m_cfg in h2_moments:
+        bonus_total += await _interactive_shared(m_cfg)
 
     # ── Концовка — 80'+ ───────────────────────────────────────────────────────
     late2_evs = [(m, t) for m, t in h2_events if m > 65]
@@ -1826,10 +1883,10 @@ async def _run_match_animation(
         result_hdr = "💀 *Поражение*"
         emoji_row  = "😤"
 
-    r_str = f"+{r_delta}" if r_delta >= 0 else str(r_delta)
-    total_coins = coins + bonus_total
-    c_str = f"+{total_coins}"
-    bonus_str   = f"  _(+{bonus_total} бонус)_" if bonus_total else ""
+    r_str     = f"+{r_delta}" if r_delta >= 0 else str(r_delta)
+    total_c   = coins + bonus_total
+    c_str     = f"+{total_c}"
+    bonus_str = f"  _(+{bonus_total} бонус)_" if bonus_total else ""
 
     acc_a_str = f"{stats['acc_a']}%"
     acc_b_str = f"{stats['acc_b']}%"
@@ -2116,7 +2173,27 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "all_events": match_stats["all_events"],
     }
 
-    # Анимация для обоих игроков одновременно (каждый со своим my_uid и sa)
+    # ── Создаём shared интерактивные моменты ──────────────────────────────────
+    match_key   = f"{challenger_id}_{accepter_id}"
+    n_h1 = 1 if random.random() < 0.55 else 0
+    n_h2 = 1 if random.random() < 0.55 else 0
+    moment_pool = ["penalty", "1v1", "freekick"]
+    shared_moments: list[dict] = []
+
+    for half_num, n in ((1, n_h1), (2, n_h2)):
+        for _ in range(n):
+            mtype    = random.choice(moment_pool)
+            minute   = random.randint(28, 42) if half_num == 1 else random.randint(58, 72)
+            attacker = random.choice([challenger_id, accepter_id])
+            keeper   = accepter_id if attacker == challenger_id else challenger_id
+            mid      = f"{match_key}_{half_num}_{mtype}"
+            _match_moments[mid] = _MatchMoment(mtype, attacker, keeper)
+            shared_moments.append({
+                "half": half_num, "minute": minute, "type": mtype,
+                "attacker_uid": attacker, "keeper_uid": keeper, "moment_id": mid,
+            })
+
+    # Анимация для обоих игроков одновременно
     await asyncio.gather(
         _run_match_animation(
             bot=ctx.bot,
@@ -2125,10 +2202,10 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             my_name=my_name,
             opp_name=ch_name,
             my_uid=accepter_id,
-            sa=sb,              # sb = accepter's strength
             stats=stats_ac,
             r_delta=delta_ac,
             coins=coins_ac,
+            shared_moments=shared_moments,
         ),
         _run_match_animation(
             bot=ctx.bot,
@@ -2137,12 +2214,15 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             my_name=ch_name,
             opp_name=my_name,
             my_uid=challenger_id,
-            sa=sa,              # sa = challenger's strength
             stats=match_stats,
             r_delta=delta_ch,
             coins=coins_ch,
+            shared_moments=shared_moments,
         ),
     )
+    # Очищаем shared моменты
+    for mid in [m["moment_id"] for m in shared_moments]:
+        _match_moments.pop(mid, None)
 
 
 async def cb_fut_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
