@@ -823,7 +823,10 @@ async def cb_fut_sell_dupes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cb_fut_team(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q   = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass   # уже отвечено вызывающим хендлером
     uid = q.from_user.id
 
     team = _get_team(uid)
@@ -916,36 +919,78 @@ async def cb_fut_team_slot(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if not team:
         await q.answer("Сначала создай команду.", show_alert=True); return
 
-    form     = FORMATIONS.get(team["formation"], FORMATIONS["433"])
-    grp      = form["slots"].get(slot)
+    form  = FORMATIONS.get(team["formation"], FORMATIONS["433"])
+    grp   = form["slots"].get(slot)
     if not grp:
         await q.answer("Неизвестная позиция.", show_alert=True); return
 
-    # Фильтр совместимых карточек
+    slots = team.get("slots") or {}
+
+    # Кто сейчас стоит на этом слоте (если есть)
+    current_club_id = slots.get(slot)
+    current_card    = _get_card_by_id(int(current_club_id)) if current_club_id else None
+
+    # Игроки уже занятые в ДРУГИХ слотах — их нельзя выбрать повторно
+    already_assigned = {
+        int(v) for k, v in slots.items()
+        if k != slot and v is not None
+    }
+
     all_cards  = _sort_cards(_get_club_all(uid), "od")
     compatible = [
         c for c in all_cards
         if grp in POSITION_CAN_PLAY.get(c["position"].upper(), [])
+        and c["club_id"] not in already_assigned
     ]
     total  = len(compatible)
     offset = page * TEAM_PAGE_SIZE
 
     if total == 0:
+        kb = []
+        if current_card:
+            kb.append([InlineKeyboardButton(
+                f"❌ Снять {_short_name(current_card['name'])}",
+                callback_data=f"fut_team_remove_{slot}",
+            )])
+        kb += [
+            [InlineKeyboardButton("📦 Паки",   callback_data="fut_packs")],
+            [InlineKeyboardButton("◀ Команда", callback_data="fut_team")],
+        ]
         await q.edit_message_text(
-            f"❌ Нет игроков для позиции *{SLOT_LABEL.get(slot, slot)}*.\n"
-            "Открой паки и добери нужных!",
+            f"❌ Нет доступных игроков для *{SLOT_LABEL.get(slot, slot)}*.\n\n"
+            "_Все подходящие уже в составе, или их нет в клубе._",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📦 Паки",   callback_data="fut_packs")],
-                [InlineKeyboardButton("◀ Команда", callback_data="fut_team")],
-            ]),
+            reply_markup=InlineKeyboardMarkup(kb),
         )
         return
 
     page_cards = compatible[offset: offset + TEAM_PAGE_SIZE]
     pages      = (total + TEAM_PAGE_SIZE - 1) // TEAM_PAGE_SIZE
 
+    # Заголовок — показываем текущего игрока если слот занят
+    if current_card:
+        rar_cur = _rarity_short(current_card["rating"], current_card["version"])
+        header = (
+            f"👤 *{SLOT_LABEL.get(slot, slot)}* — {GROUP_NAME.get(grp, grp)}\n"
+            f"Сейчас: {_pos_icon(current_card['position'])} "
+            f"*{current_card['name']}*  {rar_cur} {current_card['rating']}\n"
+            f"_Стр. {page + 1}/{pages} • Доступных: {total}_\n\n"
+            "Выбери замену:"
+        )
+    else:
+        header = (
+            f"👤 *{SLOT_LABEL.get(slot, slot)}* — {GROUP_NAME.get(grp, grp)}\n"
+            f"_Стр. {page + 1}/{pages} • Доступных: {total}_\n\n"
+            "Выбери игрока:"
+        )
+
     card_btns = []
+    # Кнопка «снять игрока» первой, если слот занят
+    if current_card:
+        card_btns.append([InlineKeyboardButton(
+            f"❌ Снять {_short_name(current_card['name'])}",
+            callback_data=f"fut_team_remove_{slot}",
+        )])
     for c in page_cards:
         rar = _rarity_short(c["rating"], c["version"])
         lbl = f"{_pos_icon(c['position'])} {c['name'][:18]}  {rar} {c['rating']}"
@@ -962,15 +1007,33 @@ async def cb_fut_team_slot(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     kb = card_btns
     if nav:
         kb.append(nav)
-    kb.append([InlineKeyboardButton("◀ Назад", callback_data="fut_team")])
+    kb.append([InlineKeyboardButton("◀ Поле", callback_data="fut_team")])
 
     await q.edit_message_text(
-        f"👤 *{SLOT_LABEL.get(slot, slot)}* — {GROUP_NAME.get(grp, grp)}\n"
-        f"_Стр. {page + 1}/{pages} • Подходящих: {total}_\n\n"
-        "Выбери игрока:",
+        header,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb),
     )
+
+
+async def cb_fut_team_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Снять игрока с позиции. fut_team_remove_{slot}"""
+    q   = update.callback_query
+    uid = q.from_user.id
+    slot = q.data[len("fut_team_remove_"):]
+
+    team = _get_team(uid)
+    if not team:
+        await q.answer("Команда не найдена.", show_alert=True); return
+
+    slots = dict(team.get("slots") or {})
+    if slot in slots:
+        del slots[slot]
+        _save_team(uid, team["formation"], slots)
+
+    await q.answer("Игрок снят с позиции")
+    q.data = "fut_team"
+    await cb_fut_team(update, ctx)
 
 
 async def cb_fut_team_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1016,6 +1079,7 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_club_",            cb_fut_club),
         # Команда (специфичные — до общего fut_team$)
         ("^fut_team_setform_",    cb_fut_team_setform),
+        ("^fut_team_remove_",     cb_fut_team_remove),
         ("^fut_team_slot_",       cb_fut_team_slot),
         ("^fut_team_pick_",       cb_fut_team_pick),
         ("^fut_team_form$",       cb_fut_team_form),
