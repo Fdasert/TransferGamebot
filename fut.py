@@ -1314,94 +1314,204 @@ def _calc_strength(user_id: int) -> dict:
                   (sum(gk_vals)  / max(len(gk_vals),  1)) * 0.3) * bonus) if def_vals or gk_vals else 70
     ovr  = _team_ovr(placed_cards)
 
-    return {"att": att, "def_": def_, "ovr": ovr, "chem": chem, "placed": len(placed_cards)}
+    # Дополнительные данные для комментария
+    scorers = []
+    all_players_short = []
+    gk_name = "Вратарь"
+    pas_sum = 0
 
+    for slot_name, group in form["slots"].items():
+        club_id2 = slots.get(slot_name)
+        if club_id2 is None:
+            continue
+        card2 = by_id.get(int(club_id2))
+        if card2 is None:
+            continue
+        short = _short_name(card2["name"])
+        all_players_short.append(short)
+        pas_sum += card2.get("pas", 75)
+        if group in ("ATT", "MID"):
+            scorers.append(short)
+        if group == "GK":
+            gk_name = short
 
-def _simulate_half(sa: dict, sb: dict, start_min: int) -> dict:
-    """
-    Симулирует один тайм (9 отрезков по 5 мин = 45 мин).
-    Возвращает {goals_a, goals_b, poss_a, passes_a, acc_a, corners_a,
-                                  poss_b, passes_b, acc_b, corners_b, events}.
-    """
-    GOAL_BASE = 0.18   # шанс гола за 5 мин при равных командах (≈1.6 гола за тайм)
-    goals_a = goals_b = 0
-    poss_a  = poss_b  = 0
-    passes_a = passes_b = 0
-    acc_a_sum = acc_b_sum = 0.0
-    corners_a = corners_b = 0
-    events: list[str] = []
-
-    att_a, def_a = sa["att"], sa["def_"]
-    att_b, def_b = sb["att"], sb["def_"]
-
-    for i in range(9):
-        minute = start_min + (i + 1) * 5
-
-        # Владение в этом отрезке
-        total_str = att_a + def_a + att_b + def_b
-        poss_a_prob = (att_a + def_a) / total_str if total_str > 0 else 0.5
-        a_has_ball = random.random() < poss_a_prob
-
-        if a_has_ball:
-            poss_a += 5
-            p = random.randint(10, 18)
-            passes_a += p
-            base_acc = min(0.92, 0.60 + (sa.get("pas_avg", 75) / 100) * 0.35)
-            acc_a_sum += base_acc
-            # Угловой
-            if random.random() < 0.18:
-                corners_a += 1
-            # Гол
-            total_ab = att_a + def_b
-            if total_ab > 0 and random.random() < GOAL_BASE * (att_a / total_ab):
-                goals_a += 1
-                events.append(f"⚽ {minute}'")
-        else:
-            poss_b += 5
-            p = random.randint(10, 18)
-            passes_b += p
-            base_acc = min(0.92, 0.60 + (sb.get("pas_avg", 75) / 100) * 0.35)
-            acc_b_sum += base_acc
-            if random.random() < 0.18:
-                corners_b += 1
-            total_ba = att_b + def_a
-            if total_ba > 0 and random.random() < GOAL_BASE * (att_b / total_ba):
-                goals_b += 1
-                events.append(f"⚽ {minute}' (соп)")
-
-    # Точность передач — среднее по блокам с владением
-    poss_blocks_a = max(1, poss_a // 5)
-    poss_blocks_b = max(1, poss_b // 5)
-    acc_a = round((acc_a_sum / poss_blocks_a) * 100)
-    acc_b = round((acc_b_sum / poss_blocks_b) * 100)
+    pas_avg = round(pas_sum / max(len(placed_cards), 1))
 
     return {
-        "goals_a": goals_a, "goals_b": goals_b,
-        "poss_a": poss_a,   "poss_b": poss_b,
-        "passes_a": passes_a, "acc_a": acc_a,
-        "passes_b": passes_b, "acc_b": acc_b,
-        "corners_a": corners_a, "corners_b": corners_b,
-        "events": events,
+        "att": att, "def_": def_, "ovr": ovr, "chem": chem,
+        "placed": len(placed_cards),
+        "scorers":    scorers or all_players_short or ["Игрок"],
+        "all_names":  all_players_short or ["Игрок"],
+        "gk_name":    gk_name,
+        "pas_avg":    pas_avg,
     }
 
 
+# ── Комментарий ────────────────────────────────────────────────────────────────
+
+_SAVES    = ["Сейв!", "Вратарь тянет!", "В перекладину!", "Не пройти!", "Отличный блок!"]
+_MISSES   = ["Выше ворот!", "Мимо!", "Штанга!", "Какой момент упущен!", "Чуть не хватило!"]
+_PRESSURE = ["Давление продолжается", "Острая атака", "Опасный момент", "Навес в штрафную"]
+_DANGER   = ["Острый момент!", "Один на один с вратарём!", "Выход на ворота!"]
+
+
 def _simulate_match(sa: dict, sb: dict) -> dict:
-    """Два тайма по 45 мин. Возвращает полную статистику матча."""
-    h1 = _simulate_half(sa, sb, 0)
-    h2 = _simulate_half(sa, sb, 45)
+    """
+    Детальная симуляция матча — 5-минутные блоки (9 в каждом тайме).
+    Каждый блок генерирует 0-2 события с реальными именами игроков.
+    События с пометкой *(соп)* — голы/моменты соперника (команды B).
+    """
+    GOAL_BASE = 0.20   # шанс гола за 5 мин при равных
+    CARD_PROB = 0.04   # желтая карточка за блок
+    PEN_PROB  = 0.04   # пенальти за тайм
+
+    score_a = score_b = 0
+    h1_score_a = h1_score_b = 0
+    poss_a = poss_b = 0
+    shots_a = shots_b = 0
+    corners_a = corners_b = 0
+    passes_a = passes_b = 0
+    acc_a_sum = acc_b_sum = 0.0
+    acc_blk_a = acc_blk_b = 0
+    yellows_a = yellows_b = 0
+    red_a = red_b = False
+    eff_a = eff_b = 70.0  # defaults for injury time
+    total_eff = 140.0
+
+    events: list[tuple[int, str]] = []
+
+    sc_a = sa.get("scorers", ["Игрок"])
+    sc_b = sb.get("scorers", ["Игрок"])
+    nm_a = sa.get("all_names", ["Игрок"])
+    nm_b = sb.get("all_names", ["Игрок"])
+
+    def _chance(att: float, def_: float, scorers: list, is_penalty: bool,
+                minute: int, is_a: bool) -> tuple[str, str] | None:
+        nonlocal score_a, score_b, shots_a, shots_b, corners_a, corners_b
+        goal_prob = (att / max(att + def_, 1)) * (0.70 if is_penalty else GOAL_BASE * 2)
+        r = random.random()
+        name = random.choice(scorers)
+        side = "" if is_a else " *(соп)*"
+        if r < goal_prob:
+            if is_a:
+                score_a += 1; shots_a += 1
+            else:
+                score_b += 1; shots_b += 1
+            prefix = "🟡→⚽" if is_penalty else "⚽"
+            sc_str = f"{score_a}:{score_b}"
+            return (f"{prefix} *{minute}'* — *{name}*!  _{sc_str}_{side}", "goal")
+        elif r < goal_prob + 0.28:
+            if is_a: shots_a += 1
+            else:    shots_b += 1
+            return (f"🧤 *{minute}'* — {name}: {random.choice(_SAVES)}{side}", "save")
+        elif r < goal_prob + 0.50:
+            return (f"💨 *{minute}'* — {name}: {random.choice(_MISSES)}{side}", "miss")
+        else:
+            if is_a: corners_a += 1
+            else:    corners_b += 1
+            return (f"🚩 *{minute}'* — Угловой{side}", "corner")
+
+    for half in range(2):
+        pen_minute_a = (random.randint(half * 45 + 10, half * 45 + 44)
+                        if random.random() < PEN_PROB else None)
+        pen_minute_b = (random.randint(half * 45 + 10, half * 45 + 44)
+                        if random.random() < PEN_PROB else None)
+
+        for blk in range(9):
+            minute = half * 45 + (blk + 1) * 5
+
+            if pen_minute_a and abs(minute - pen_minute_a) < 5:
+                pen_minute_a = None
+                ev = _chance(sa["att"], sb["def_"], sc_a, True, minute, True)
+                if ev: events.append((minute, ev[0]))
+            if pen_minute_b and abs(minute - pen_minute_b) < 5:
+                pen_minute_b = None
+                ev = _chance(sb["att"], sa["def_"], sc_b, True, minute, False)
+                if ev: events.append((minute, ev[0]))
+
+            eff_a = (sa["att"] + sa["def_"]) * (0.80 if red_a else 1.0)
+            eff_b = (sb["att"] + sb["def_"]) * (0.80 if red_b else 1.0)
+            total_eff = eff_a + eff_b or 1
+            a_has_ball = random.random() < (eff_a / total_eff)
+
+            if a_has_ball:
+                poss_a += 5
+                p = random.randint(9, 16)
+                passes_a += p
+                acc = min(0.93, 0.62 + sa.get("pas_avg", 70) / 400)
+                acc_a_sum += acc; acc_blk_a += 1
+                if random.random() < 0.38:
+                    ev = _chance(sa["att"], sb["def_"], sc_a, False, minute, True)
+                    if ev: events.append((minute, ev[0]))
+                else:
+                    if random.random() < 0.20:
+                        events.append((minute, f"⚙️ *{minute}'* — {random.choice(_PRESSURE)}"))
+                if random.random() < CARD_PROB and yellows_a < 3 and nm_a:
+                    yellows_a += 1
+                    name = random.choice(nm_a)
+                    events.append((minute, f"🟨 *{minute}'* — {name} (предупреждение)"))
+                    if yellows_a == 2 and random.random() < 0.25:
+                        red_a = True
+                        events.append((minute, f"🟥 *{minute}'* — {name} — УДАЛЁН!"))
+            else:
+                poss_b += 5
+                p = random.randint(9, 16)
+                passes_b += p
+                acc = min(0.93, 0.62 + sb.get("pas_avg", 70) / 400)
+                acc_b_sum += acc; acc_blk_b += 1
+                if random.random() < 0.38:
+                    ev = _chance(sb["att"], sa["def_"], sc_b, False, minute, False)
+                    if ev: events.append((minute, ev[0]))
+                else:
+                    if random.random() < 0.20:
+                        events.append((minute, f"⚙️ *{minute}'* — {random.choice(_DANGER)}"))
+                if random.random() < CARD_PROB and yellows_b < 3 and nm_b:
+                    yellows_b += 1
+                    name = random.choice(nm_b)
+                    events.append((minute, f"🟨 *{minute}'* — {name} (предупреждение соп)"))
+                    if yellows_b == 2 and random.random() < 0.25:
+                        red_b = True
+                        events.append((minute, f"🟥 *{minute}'* — {name} — УДАЛЁН! (соп)"))
+
+        # Компенсированное время
+        if abs(score_a - score_b) <= 1:
+            inj = half * 45 + random.randint(47, 50)
+            if random.random() < 0.30:
+                is_a = random.random() < (eff_a / total_eff)
+                ev = _chance(
+                    sa["att"] if is_a else sb["att"],
+                    sb["def_"] if is_a else sa["def_"],
+                    sc_a if is_a else sc_b, False, inj, is_a,
+                )
+                if ev: events.append((inj, f"⏱ {ev[0]}"))
+
+        # Фиксируем счёт первого тайма
+        if half == 0:
+            h1_score_a = score_a
+            h1_score_b = score_b
+
+    events.sort(key=lambda x: x[0])
+
+    total_poss = poss_a + poss_b or 1
+    acc_a = round((acc_a_sum / max(acc_blk_a, 1)) * 100)
+    acc_b = round((acc_b_sum / max(acc_blk_b, 1)) * 100)
+
+    h1_evs = [(m, t) for m, t in events if m <= 45]
+    h2_evs = [(m, t) for m, t in events if m > 45]
+
     return {
-        "score_a": h1["goals_a"] + h2["goals_a"],
-        "score_b": h1["goals_b"] + h2["goals_b"],
-        "h1_a": h1["goals_a"], "h1_b": h1["goals_b"],
-        "poss_a":    h1["poss_a"]    + h2["poss_a"],
-        "poss_b":    h1["poss_b"]    + h2["poss_b"],
-        "passes_a":  h1["passes_a"]  + h2["passes_a"],
-        "passes_b":  h1["passes_b"]  + h2["passes_b"],
-        "acc_a":     round((h1["acc_a"] + h2["acc_a"]) / 2),
-        "acc_b":     round((h1["acc_b"] + h2["acc_b"]) / 2),
-        "corners_a": h1["corners_a"] + h2["corners_a"],
-        "corners_b": h1["corners_b"] + h2["corners_b"],
-        "h1": h1, "h2": h2,
+        "score_a":   score_a,    "score_b":   score_b,
+        "h1_a":      h1_score_a, "h1_b":      h1_score_b,
+        "poss_a":    round(poss_a / total_poss * 100),
+        "poss_b":    round(poss_b / total_poss * 100),
+        "passes_a":  passes_a,   "passes_b":  passes_b,
+        "acc_a":     acc_a,      "acc_b":     acc_b,
+        "corners_a": corners_a,  "corners_b": corners_b,
+        "shots_a":   shots_a,    "shots_b":   shots_b,
+        "yellows_a": yellows_a,  "yellows_b": yellows_b,
+        "h1_events": h1_evs,
+        "h2_events": h2_evs,
+        "all_events": events,
     }
 
 
@@ -1460,12 +1570,12 @@ def _match_preview_text(my_name: str, opp_name: str, sa: dict, sb: dict,
 async def _run_match_animation(
     bot, chat_id: int, message_id: int | None,
     my_name: str, opp_name: str,
-    stats: dict,        # результат _simulate_match, с точки зрения "моей" команды = A
+    stats: dict,        # результат _simulate_match (с точки зрения "моей" команды = A)
     r_delta: int, coins: int,
 ) -> None:
-    """Анимирует матч в двух таймах по 45 мин."""
+    """Анимирует матч в двух таймах по 45 мин с живыми событиями."""
 
-    sent_id = message_id  # если None — сначала шлём, потом редактируем
+    sent_id = message_id  # если None — сначала шлём новым сообщением
 
     async def _show(text: str, kb=None):
         nonlocal sent_id
@@ -1484,10 +1594,14 @@ async def _run_match_animation(
         except Exception:
             pass
 
-    score_a = stats["score_a"]
-    score_b = stats["score_b"]
-    h1_a    = stats["h1_a"]
-    h1_b    = stats["h1_b"]
+    score_a   = stats["score_a"]
+    score_b   = stats["score_b"]
+    h1_a      = stats["h1_a"]
+    h1_b      = stats["h1_b"]
+    h1_events = stats["h1_events"]   # list[(minute, text)]
+    h2_events = stats["h2_events"]   # list[(minute, text)]
+    poss_a    = stats["poss_a"]      # уже в %
+    poss_b    = stats["poss_b"]
 
     # ── Старт ─────────────────────────────────────────────────────────────────
     await _show(
@@ -1498,7 +1612,7 @@ async def _run_match_animation(
     )
     await asyncio.sleep(1.5)
 
-    # ── 1-й тайм (прогресс) ───────────────────────────────────────────────────
+    # ── 1-й тайм — 0' ─────────────────────────────────────────────────────────
     await _show(
         f"⏱ *1-й тайм — 0:00*\n\n"
         f"🔵 *{my_name}*  *0* : *0*  🔴 *{opp_name}*\n\n"
@@ -1506,37 +1620,45 @@ async def _run_match_animation(
     )
     await asyncio.sleep(2.0)
 
-    # Промежуток 20-25 мин — показываем промежуточный счёт 1-го тайма
-    mid_a = h1_a if random.random() > 0.4 else 0
-    mid_b = h1_b if random.random() > 0.4 else 0
-    mid_a = min(mid_a, h1_a)
-    mid_b = min(mid_b, h1_b)
-    h1_events = stats["h1"].get("events", [])
-    event_str  = "  ".join(h1_events[:3]) if h1_events else "_Голов нет_"
+    # ── 1-й тайм — 25' ─────────────────────────────────────────────────────────
+    early_evs = [(m, t) for m, t in h1_events if m <= 25]
+    if early_evs:
+        shown = "\n".join(t for _, t in early_evs[-2:])
+    else:
+        shown = "_Команды осторожно входят в игру..._"
     await _show(
         f"⏱ *1-й тайм — 25:00*\n\n"
-        f"🔵 *{my_name}*  *{mid_a}* : *{mid_b}*  🔴 *{opp_name}*\n\n"
-        f"{event_str}"
+        f"🔵 *{my_name}*  *0* : *0*  🔴 *{opp_name}*\n\n"
+        f"{shown}"
     )
     await asyncio.sleep(2.0)
 
-    # ── Перерыв ───────────────────────────────────────────────────────────────
-    poss_a_h1 = round(stats["h1"]["poss_a"] / max(stats["h1"]["poss_a"] + stats["h1"]["poss_b"], 1) * 100)
+    # ── 1-й тайм — 40' ─────────────────────────────────────────────────────────
+    late_h1 = [(m, t) for m, t in h1_events if 25 < m <= 45]
+    if late_h1:
+        shown2 = "\n".join(t for _, t in late_h1[-2:])
+        await _show(
+            f"⏱ *1-й тайм — 40:00*\n\n"
+            f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
+            f"{shown2}"
+        )
+        await asyncio.sleep(1.8)
+
+    # ── Перерыв — 45' ─────────────────────────────────────────────────────────
     await _show(
         f"🕐 *Перерыв — 45'*\n\n"
         f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
-        f"📊 Владение 1-го тайма: *{poss_a_h1}%* — *{100-poss_a_h1}%*\n"
+        f"📊 Владение 1-го тайма: *{poss_a}%* — *{poss_b}%*\n"
         f"_Команды уходят в раздевалку..._"
     )
     await asyncio.sleep(2.2)
 
-    # ── 2-й тайм (нагнетание) ─────────────────────────────────────────────────
+    # ── 2-й тайм — 45' ─────────────────────────────────────────────────────────
     if score_a != score_b:
         leading = my_name if score_a > score_b else opp_name
-        tension = f"_{leading} ведёт! Соперник ищет шанс..._"
+        tension = f"_{leading} ведёт! Нужно отыгрываться..._"
     else:
         tension = "_Равная борьба — всё решится сейчас!_"
-
     await _show(
         f"⏱ *2-й тайм — 45:00*\n\n"
         f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
@@ -1544,14 +1666,25 @@ async def _run_match_animation(
     )
     await asyncio.sleep(2.0)
 
-    # Финальные минуты
-    h2_events = stats["h2"].get("events", [])
-    if h2_events:
-        ev2_str = "  ".join(h2_events[:3])
+    # ── 2-й тайм — 70' ─────────────────────────────────────────────────────────
+    mid2_evs = [(m, t) for m, t in h2_events if m <= 70]
+    if mid2_evs:
+        shown3 = "\n".join(t for _, t in mid2_evs[-2:])
         await _show(
-            f"🔥 *Концовка матча!*\n\n"
+            f"⏱ *2-й тайм — 70:00*\n\n"
             f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
-            f"{ev2_str}\n_⚡ Горячие минуты!_"
+            f"{shown3}"
+        )
+        await asyncio.sleep(2.0)
+
+    # ── Концовка — 85'+ ───────────────────────────────────────────────────────
+    late2_evs = [(m, t) for m, t in h2_events if m > 70]
+    if late2_evs:
+        shown4 = "\n".join(t for _, t in late2_evs[-2:])
+        await _show(
+            f"🔥 *Горячая концовка!*\n\n"
+            f"🔵 *{my_name}*  *{score_a}* : *{score_b}*  🔴 *{opp_name}*\n\n"
+            f"{shown4}"
         )
         await asyncio.sleep(1.8)
 
@@ -1569,21 +1702,16 @@ async def _run_match_animation(
     r_str = f"+{r_delta}" if r_delta >= 0 else str(r_delta)
     c_str = f"+{coins}"
 
-    # Общее владение
-    total_poss = stats["poss_a"] + stats["poss_b"]
-    poss_a_pct = round(stats["poss_a"] / max(total_poss, 1) * 100)
-    poss_b_pct = 100 - poss_a_pct
+    acc_a_str = f"{stats['acc_a']}%"
+    acc_b_str = f"{stats['acc_b']}%"
+    pos_a_str = f"{poss_a}%"
+    pos_b_str = f"{poss_b}%"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("⚔️ Ещё матч", callback_data="fut_match"),
          InlineKeyboardButton("🏟 Команда",  callback_data="fut_team")],
         [InlineKeyboardButton("◀ FUT меню",  callback_data="fut_menu")],
     ])
-
-    acc_a_str = f"{stats['acc_a']}%"
-    acc_b_str = f"{stats['acc_b']}%"
-    pos_a_str = f"{poss_a_pct}%"
-    pos_b_str = f"{poss_b_pct}%"
 
     await _show(
         f"{result_hdr}  {emoji_row}\n\n"
@@ -1592,6 +1720,7 @@ async def _run_match_animation(
         f"```\n"
         f"{'':>14}{'🔵':^7}{'🔴':^7}\n"
         f"{'Владение':>14}{pos_a_str:^7}{pos_b_str:^7}\n"
+        f"{'Удары':>14}{stats['shots_a']:^7}{stats['shots_b']:^7}\n"
         f"{'Передачи':>14}{stats['passes_a']:^7}{stats['passes_b']:^7}\n"
         f"{'Точность':>14}{acc_a_str:^7}{acc_b_str:^7}\n"
         f"{'Угловые':>14}{stats['corners_a']:^7}{stats['corners_b']:^7}\n"
@@ -1792,14 +1921,9 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     ch_name  = data.get("challenger_name", f"User{challenger_id}")
     my_name  = q.from_user.first_name or "Соперник"
 
-    # Силы команд
-    sa = {  # challenger (тот кто вызвал)
-        "att":  data.get("challenger_att",  70),
-        "def_": data.get("challenger_def",  70),
-        "ovr":  data.get("challenger_ovr",  70),
-        "chem": data.get("challenger_chem", 0),
-    }
-    sb = _calc_strength(accepter_id)  # accepter
+    # Силы команд (пересчитываем актуально, включая имена игроков для комментария)
+    sa = _calc_strength(challenger_id)  # challenger (тот кто вызвал)
+    sb = _calc_strength(accepter_id)    # accepter
 
     # Рейтинги
     ra = data.get("challenger_rating", 1000)
@@ -1842,19 +1966,25 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Статистика для accepter (A и B меняются местами)
     stats_ac = {
-        "score_a": score_ac, "score_b": score_ch,
-        "h1_a": match_stats["h1"]["goals_b"], "h1_b": match_stats["h1"]["goals_a"],
-        "poss_a": match_stats["poss_b"], "poss_b": match_stats["poss_a"],
-        "passes_a": match_stats["passes_b"], "acc_a": match_stats["acc_b"],
-        "passes_b": match_stats["passes_a"], "acc_b": match_stats["acc_a"],
-        "corners_a": match_stats["corners_b"], "corners_b": match_stats["corners_a"],
-        "h1": {
-            "poss_a": match_stats["h1"]["poss_b"], "poss_b": match_stats["h1"]["poss_a"],
-            "events": [e.replace(" (соп)", "🔄").replace("⚽", "⚽ соп") for e in match_stats["h1"]["events"]],
-        },
-        "h2": {
-            "events": [e.replace(" (соп)", "🔄").replace("⚽", "⚽ соп") for e in match_stats["h2"]["events"]],
-        },
+        "score_a":   score_ac,
+        "score_b":   score_ch,
+        "h1_a":      match_stats["h1_b"],
+        "h1_b":      match_stats["h1_a"],
+        "poss_a":    match_stats["poss_b"],
+        "poss_b":    match_stats["poss_a"],
+        "passes_a":  match_stats["passes_b"],
+        "passes_b":  match_stats["passes_a"],
+        "acc_a":     match_stats["acc_b"],
+        "acc_b":     match_stats["acc_a"],
+        "corners_a": match_stats["corners_b"],
+        "corners_b": match_stats["corners_a"],
+        "shots_a":   match_stats["shots_b"],
+        "shots_b":   match_stats["shots_a"],
+        "yellows_a": match_stats["yellows_b"],
+        "yellows_b": match_stats["yellows_a"],
+        "h1_events": match_stats["h1_events"],   # события показываем как нейтральный комментарий
+        "h2_events": match_stats["h2_events"],
+        "all_events": match_stats["all_events"],
     }
 
     # Анимация для обоих игроков одновременно
