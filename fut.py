@@ -1679,6 +1679,91 @@ async def cb_fut_interact(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 #  МАТЧИ — АНИМАЦИЯ
 # ══════════════════════════════════════════════════════════════════════════════
 
+_BOT_UID_SENTINEL = -1  # псевдо-uid для «бот-соперника» в драфте/турнире
+
+
+def _make_shared_moments_pvp(
+    uid_a: int, uid_b: int,
+    sa_a: dict, sa_b: dict,
+    match_key: str,
+) -> list[dict]:
+    """Создаёт интерактивные моменты для матча двух живых игроков.
+    Регистрирует _MatchMoment в глобальном _match_moments.
+    Возвращает список moment-cfg для _run_match_animation."""
+    moment_pool   = ["penalty", "1v1", "freekick"]
+    shared: list[dict] = []
+    n_h1 = 1 if random.random() < 0.55 else 0
+    n_h2 = 1 if random.random() < 0.55 else 0
+    for half_num, n in ((1, n_h1), (2, n_h2)):
+        for _ in range(n):
+            mtype    = random.choice(moment_pool)
+            minute   = random.randint(28, 42) if half_num == 1 else random.randint(58, 72)
+            attacker = random.choice([uid_a, uid_b])
+            keeper   = uid_b if attacker == uid_a else uid_a
+            mid      = f"{match_key}_{half_num}_{mtype}"
+            _match_moments[mid] = _MatchMoment(mtype, attacker, keeper)
+            att_str  = sa_a["att"] if attacker == uid_a else sa_b["att"]
+            def_str  = sa_a["def_"] if keeper == uid_a else sa_b["def_"]
+            shared.append({
+                "half": half_num, "minute": minute, "type": mtype,
+                "attacker_uid": attacker, "keeper_uid": keeper, "moment_id": mid,
+                "att_str": att_str, "def_str": def_str,
+            })
+    return shared
+
+
+def _make_shared_moments_vs_bot(
+    human_uid: int,
+    human_sa: dict,
+    bot_sa: dict,
+    match_key: str,
+) -> list[dict]:
+    """Создаёт интерактивные моменты для матча человека против бота.
+    Бот сразу делает случайный выбор — анимация разрешится как только
+    игрок нажмёт кнопку (или истечёт таймер).
+    Возвращает список moment-cfg для _run_match_animation (только human_uid получает анимацию)."""
+    BOT_UID = _BOT_UID_SENTINEL
+    moment_pool   = ["penalty", "1v1", "freekick"]
+    shared: list[dict] = []
+    n_h1 = 1 if random.random() < 0.55 else 0
+    n_h2 = 1 if random.random() < 0.55 else 0
+    for half_num, n in ((1, n_h1), (2, n_h2)):
+        for _ in range(n):
+            mtype    = random.choice(moment_pool)
+            minute   = random.randint(28, 42) if half_num == 1 else random.randint(58, 72)
+            attacker = random.choice([human_uid, BOT_UID])
+            keeper   = BOT_UID if attacker == human_uid else human_uid
+            mid      = f"{match_key}_{half_num}_{mtype}"
+            moment   = _MatchMoment(mtype, attacker, keeper)
+            _match_moments[mid] = moment
+
+            att_str  = human_sa["att"] if attacker == human_uid else bot_sa["att"]
+            def_str  = human_sa["def_"] if keeper == human_uid else bot_sa["def_"]
+
+            # Бот немедленно делает выбор
+            BOT_CHOICES = {
+                "penalty":  ["left", "center", "right"],
+                "1v1":      {"att": ["shot", "dribble"], "kpr": ["attack", "stay"]},
+                "freekick": {"att": ["top", "bottom"],   "kpr": ["up", "down"]},
+            }
+            if mtype == "1v1":
+                bot_role = "att" if attacker == BOT_UID else "kpr"
+                bot_choice = random.choice(BOT_CHOICES["1v1"][bot_role])
+            elif mtype == "freekick":
+                bot_role = "att" if attacker == BOT_UID else "kpr"
+                bot_choice = random.choice(BOT_CHOICES["freekick"][bot_role])
+            else:  # penalty — те же опции для атаки и вратаря
+                bot_choice = random.choice(BOT_CHOICES["penalty"])
+            moment.submit(BOT_UID, bot_choice)
+
+            shared.append({
+                "half": half_num, "minute": minute, "type": mtype,
+                "attacker_uid": attacker, "keeper_uid": keeper, "moment_id": mid,
+                "att_str": att_str, "def_str": def_str,
+            })
+    return shared
+
+
 async def _run_match_animation(
     bot, chat_id: int, message_id: int | None,
     my_name: str, opp_name: str,
@@ -1686,6 +1771,7 @@ async def _run_match_animation(
     stats: dict,
     r_delta: int, coins: int,
     shared_moments: list[dict] | None = None,
+    after_kb: InlineKeyboardMarkup | None = None,
 ) -> None:
     """Анимирует матч с синхронизированными интерактивными моментами."""
 
@@ -2022,17 +2108,23 @@ async def _run_match_animation(
         result_hdr = "💀 *Поражение*"
         emoji_row  = "😤"
 
-    r_str     = f"+{r_delta}" if r_delta >= 0 else str(r_delta)
-    total_c   = coins + bonus_total
-    c_str     = f"+{total_c}"
-    bonus_str = f"  _(+{bonus_total} бонус)_" if bonus_total else ""
-
     acc_a_str = f"{stats['acc_a']}%"
     acc_b_str = f"{stats['acc_b']}%"
     pos_a_str = f"{poss_a}%"
     pos_b_str = f"{poss_b}%"
 
-    kb = InlineKeyboardMarkup([
+    # Показываем рейтинг/монеты только когда они ненулевые (в обычных матчах)
+    total_c   = coins + bonus_total
+    bonus_str = f"  _(+{bonus_total} бонус)_" if bonus_total else ""
+    extra_lines = ""
+    if r_delta != 0:
+        r_str = f"+{r_delta}" if r_delta >= 0 else str(r_delta)
+        extra_lines += f"📈 Рейтинг:   *{r_str}* ⭐\n"
+    if total_c != 0:
+        c_str = f"+{total_c}"
+        extra_lines += f"💰 Монеты:    *{c_str}* 💰{bonus_str}\n"
+
+    kb = after_kb or InlineKeyboardMarkup([
         [InlineKeyboardButton("⚔️ Ещё матч", callback_data="fut_match"),
          InlineKeyboardButton("🏟 Команда",  callback_data="fut_team")],
         [InlineKeyboardButton("◀ FUT меню",  callback_data="fut_menu")],
@@ -2050,8 +2142,7 @@ async def _run_match_animation(
         f"{'Точность':>14}{acc_a_str:^7}{acc_b_str:^7}\n"
         f"{'Угловые':>14}{stats['corners_a']:^7}{stats['corners_b']:^7}\n"
         f"```\n"
-        f"📈 Рейтинг:   *{r_str}* ⭐\n"
-        f"💰 Монеты:    *{c_str}* 💰{bonus_str}\n",
+        + extra_lines,
         kb=kb,
     )
 
@@ -4021,7 +4112,7 @@ async def cb_fut_draft_play(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cb_fut_draft_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """^fut_draft_match$ — simulate one match."""
+    """^fut_draft_match$ — play one draft match with full animation."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -4037,15 +4128,14 @@ async def cb_fut_draft_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     sa = _draft_build_sa(data["picks"])
 
     bot_ranges = [(82, 84), (83, 85), (84, 86)]
-    mn, mx     = bot_ranges[min(match_idx, len(bot_ranges) - 1)]
-    bot_sa     = _draft_bot_sa(mn, mx)
-    bot_ovr    = round((mn + mx) / 2)
+    mn, mx  = bot_ranges[min(match_idx, len(bot_ranges) - 1)]
+    bot_sa  = _draft_bot_sa(mn, mx)
+    bot_ovr = round((mn + mx) / 2)
 
     match_stats = _simulate_match(sa, bot_sa)
     my_score    = match_stats["score_a"]
     bot_score   = match_stats["score_b"]
     won         = my_score > bot_score
-    draw        = my_score == bot_score
 
     if won:
         data["wins"] += 1
@@ -4054,43 +4144,49 @@ async def cb_fut_draft_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     data["match_idx"] = match_idx + 1
     db.set_pending_action(uid, "fut_draft_solo", data)
 
-    result_icon = "✅ Победа!" if won else ("🤝 Ничья!" if draw else "❌ Поражение")
+    is_last = data["match_idx"] >= DRAFT_MATCHES
 
-    if data["match_idx"] < DRAFT_MATCHES:
-        await q.edit_message_text(
-            f"⚽ *Матч {match_idx + 1}/{DRAFT_MATCHES}*\n\n"
-            f"🔵 Ты  *{my_score} : {bot_score}*  🤖 Бот (OVR {bot_ovr})\n\n"
-            f"{result_icon}\n\n"
-            f"Побед: *{data['wins']}/{data['match_idx']}*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("▶ Следующий матч", callback_data="fut_draft_play")],
-            ]),
-        )
+    # Создаём интерактивные моменты (бот сразу делает выбор)
+    match_key     = f"draft_{uid}_{match_idx}"
+    shared_moments = _make_shared_moments_vs_bot(uid, sa, bot_sa, match_key)
+
+    # Финальная кнопка после анимации
+    if is_last:
+        after_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏆 Получить награду", callback_data="fut_draft_reward")],
+        ])
     else:
-        # All matches done
-        wins = data["wins"]
-        coins_reward, get_pack = DRAFT_REWARDS.get(wins, (0, False))
+        after_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶ Следующий матч", callback_data="fut_draft_play")],
+        ])
 
-        log_lines = []
-        for i, m in enumerate(data["match_log"]):
-            my_s, bot_s = m["my"], m["bot"]
-            ico = "✅" if my_s > bot_s else ("🤝" if my_s == bot_s else "❌")
-            log_lines.append(f"• Матч {i + 1}: {my_s}:{bot_s} {ico}")
+    bot_name = f"🤖 Бот OVR {bot_ovr}"
 
-        pack_line = "\n🎁 Эксклюзивный пак (+3 карточки OVR 83+)!" if get_pack else ""
+    # Показываем «матч начинается» и сразу запускаем анимацию фоном
+    placeholder = await q.edit_message_text(
+        f"⚽ *Матч {match_idx + 1}/{DRAFT_MATCHES}* — начинается...",
+        parse_mode="Markdown",
+    )
+    message_id = placeholder.message_id if placeholder else q.message.message_id
 
-        await q.edit_message_text(
-            f"🏁 *Матч {match_idx + 1}/{DRAFT_MATCHES}*\n\n"
-            f"🔵 Ты  *{my_score} : {bot_score}*  🤖 Бот (OVR {bot_ovr})\n\n"
-            f"{result_icon}\n\n"
-            f"Побед: *{wins}/{DRAFT_MATCHES}*\n\n"
-            f"💰 Награда: *{_fmt(coins_reward)} монет*{pack_line}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏆 Получить награду", callback_data="fut_draft_reward")],
-            ]),
+    async def _anim_and_cleanup():
+        await _run_match_animation(
+            bot=ctx.bot,
+            chat_id=uid,
+            message_id=message_id,
+            my_name="Ты",
+            opp_name=bot_name,
+            my_uid=uid,
+            stats=match_stats,
+            r_delta=0,
+            coins=0,
+            shared_moments=shared_moments,
+            after_kb=after_kb,
         )
+        for m in shared_moments:
+            _match_moments.pop(m["moment_id"], None)
+
+    asyncio.create_task(_anim_and_cleanup())
 
 
 async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4483,7 +4579,7 @@ async def cb_fut_draft_multi_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
 
 async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> None:
-    """If both players done picking, run the match and award coins."""
+    """If both players done picking, run the match with full animation and award coins."""
     room = _draft_rooms.get(room_id)
     if not room:
         return
@@ -4502,23 +4598,15 @@ async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> N
     score_g     = match_stats["score_b"]
 
     # Rewards
-    pot = int(DRAFT_ENTRY_FEE * 2 * 0.9)   # 90% of both fees
+    pot   = int(DRAFT_ENTRY_FEE * 2 * 0.9)
     bonus = 200
 
     if score_h > score_g:
-        coins_h = pot + bonus
-        coins_g = 0
-        result_h = "🏆 Победа!"
-        result_g = "❌ Поражение"
+        coins_h, coins_g = pot + bonus, 0
     elif score_g > score_h:
-        coins_h = 0
-        coins_g = pot + bonus
-        result_h = "❌ Поражение"
-        result_g = "🏆 Победа!"
+        coins_h, coins_g = 0, pot + bonus
     else:
-        coins_h = DRAFT_ENTRY_FEE
-        coins_g = DRAFT_ENTRY_FEE
-        result_h = result_g = "🤝 Ничья!"
+        coins_h = coins_g = DRAFT_ENTRY_FEE
 
     if coins_h > 0:
         db.add_coins(host_uid, coins_h)
@@ -4529,41 +4617,71 @@ async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> N
     db.clear_pending_action(guest_uid)
     _draft_rooms.pop(room_id, None)
 
-    # Send results to host
-    try:
-        await bot.send_message(
-            chat_id=host_uid,
-            text=(
-                f"⚽ *FUT Драфт — Результат*\n\n"
-                f"🔵 {host_name}  *{score_h} : {score_g}*  🔴 {guest_name}\n\n"
-                f"{result_h}\n"
-                f"💰 Монеты: *+{_fmt(coins_h)}*"
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
-            ]),
-        )
-    except Exception as e:
-        logger.warning(f"Draft multi result DM host failed: {e}")
+    # Обратные статы для гостя (он видит себя как «свою» сторону)
+    stats_guest = {
+        **match_stats,
+        "score_a":   match_stats["score_b"],
+        "score_b":   match_stats["score_a"],
+        "poss_a":    match_stats.get("poss_b", 50),
+        "poss_b":    match_stats.get("poss_a", 50),
+        "shots_a":   match_stats["shots_b"],
+        "shots_b":   match_stats["shots_a"],
+        "passes_a":  match_stats["passes_b"],
+        "passes_b":  match_stats["passes_a"],
+        "acc_a":     match_stats["acc_b"],
+        "acc_b":     match_stats["acc_a"],
+        "corners_a": match_stats["corners_b"],
+        "corners_b": match_stats["corners_a"],
+    }
 
-    # Send results to guest
+    # Создаём общие интерактивные моменты для обоих игроков
+    match_key      = f"dmulti_{room_id}"
+    shared_moments = _make_shared_moments_pvp(host_uid, guest_uid, sa, sb, match_key)
+
+    after_kb_h = InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]])
+    after_kb_g = InlineKeyboardMarkup([[InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]])
+
+    # Отправляем заглушки — анимация будет редактировать эти сообщения
     try:
-        await bot.send_message(
-            chat_id=guest_uid,
-            text=(
-                f"⚽ *FUT Драфт — Результат*\n\n"
-                f"🔵 {host_name}  *{score_h} : {score_g}*  🔴 {guest_name}\n\n"
-                f"{result_g}\n"
-                f"💰 Монеты: *+{_fmt(coins_g)}*"
-            ),
+        msg_h = await bot.send_message(
+            chat_id=host_uid,
+            text=f"⚽ *FUT Драфт* — {host_name} vs {guest_name}\n\n_Матч начинается..._",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")]
-            ]),
         )
-    except Exception as e:
-        logger.warning(f"Draft multi result DM guest failed: {e}")
+        mid_h = msg_h.message_id
+    except Exception:
+        mid_h = None
+
+    try:
+        msg_g = await bot.send_message(
+            chat_id=guest_uid,
+            text=f"⚽ *FUT Драфт* — {host_name} vs {guest_name}\n\n_Матч начинается..._",
+            parse_mode="Markdown",
+        )
+        mid_g = msg_g.message_id
+    except Exception:
+        mid_g = None
+
+    async def _animations_and_cleanup():
+        await asyncio.gather(
+            _run_match_animation(
+                bot=bot, chat_id=host_uid, message_id=mid_h,
+                my_name=host_name, opp_name=guest_name, my_uid=host_uid,
+                stats=match_stats, r_delta=0, coins=coins_h,
+                shared_moments=shared_moments, after_kb=after_kb_h,
+            ),
+            _run_match_animation(
+                bot=bot, chat_id=guest_uid, message_id=mid_g,
+                my_name=guest_name, opp_name=host_name, my_uid=guest_uid,
+                stats=stats_guest, r_delta=0, coins=coins_g,
+                shared_moments=shared_moments, after_kb=after_kb_g,
+            ),
+            return_exceptions=True,
+        )
+        for m in shared_moments:
+            _match_moments.pop(m["moment_id"], None)
+
+    asyncio.create_task(_animations_and_cleanup())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4631,7 +4749,7 @@ def _tour_lobby_text(tour: dict) -> str:
 
 
 async def _tour_run_round(tour_id: str, round_num: int, bot) -> None:
-    """Simulate all matches of the given round and advance/complete the tournament."""
+    """Simulate all matches of the given round with full animation, then advance/complete the tournament."""
     tour = db.get_fut_tournament(tour_id)
     if not tour:
         return
@@ -4640,13 +4758,19 @@ async def _tour_run_round(tour_id: str, round_num: int, bot) -> None:
     matches = tour.get("matches") or {}
     round_matches = matches.get(str(round_num), [])
 
-    results = []
-    for m in round_matches:
-        sa1 = slots[m["p1"]]["sa"]
-        sa2 = slots[m["p2"]]["sa"]
+    # ── Simulate all matches and prepare animations ────────────────────────────
+    results      = []
+    anim_tasks   = []
+    all_moments  = []  # [(match_key, [moment_cfg, ...])]
+
+    for m_idx, m in enumerate(round_matches):
+        slot1 = slots[m["p1"]]
+        slot2 = slots[m["p2"]]
+        sa1   = slot1["sa"]
+        sa2   = slot2["sa"]
         stats = _simulate_match(sa1, sa2)
-        s1 = stats["score_a"]
-        s2 = stats["score_b"]
+        s1    = stats["score_a"]
+        s2    = stats["score_b"]
         if s1 > s2:
             winner = m["p1"]
         elif s2 > s1:
@@ -4654,6 +4778,110 @@ async def _tour_run_round(tour_id: str, round_num: int, bot) -> None:
         else:
             winner = random.choice([m["p1"], m["p2"]])
         results.append({**m, "winner": winner, "s1": s1, "s2": s2})
+
+        # Build animations for human players
+        uid1 = slot1.get("uid")  # None if bot slot
+        uid2 = slot2.get("uid")
+        is_bot1 = slot1.get("is_bot", True)
+        is_bot2 = slot2.get("is_bot", True)
+        name1 = slot1["name"]
+        name2 = slot2["name"]
+        match_key = f"tour_{tour_id}_r{round_num}_m{m_idx}"
+
+        if not is_bot1 and not is_bot2:
+            # Both human — shared interactive moments
+            shared = _make_shared_moments_pvp(uid1, uid2, sa1, sa2, match_key)
+            all_moments.append((match_key, shared))
+            stats_b = {
+                **stats,
+                "score_a": stats["score_b"], "score_b": stats["score_a"],
+                "poss_a":  stats.get("poss_b", 50), "poss_b":  stats.get("poss_a", 50),
+                "shots_a": stats["shots_b"],  "shots_b": stats["shots_a"],
+                "passes_a":stats["passes_b"], "passes_b":stats["passes_a"],
+                "acc_a":   stats["acc_b"],    "acc_b":   stats["acc_a"],
+                "corners_a":stats["corners_b"],"corners_b":stats["corners_a"],
+            }
+            after_kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")]])
+            for uid, my_stats, my_name, opp_name in [
+                (uid1, stats,   name1, name2),
+                (uid2, stats_b, name2, name1),
+            ]:
+                try:
+                    msg = await bot.send_message(
+                        chat_id=uid,
+                        text=f"⚽ *Турнир {tour_id}* — {name1} vs {name2}\n\n_Матч начинается..._",
+                        parse_mode="Markdown",
+                    )
+                    mid = msg.message_id
+                except Exception:
+                    mid = None
+                anim_tasks.append(_run_match_animation(
+                    bot=bot, chat_id=uid, message_id=mid,
+                    my_name=my_name, opp_name=opp_name, my_uid=uid,
+                    stats=my_stats, r_delta=0, coins=0,
+                    shared_moments=shared, after_kb=after_kb,
+                ))
+
+        elif not is_bot1 and is_bot2:
+            # uid1 is human, uid2 is bot
+            shared = _make_shared_moments_vs_bot(uid1, sa1, sa2, match_key)
+            all_moments.append((match_key, shared))
+            after_kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")]])
+            try:
+                msg = await bot.send_message(
+                    chat_id=uid1,
+                    text=f"⚽ *Турнир {tour_id}* — {name1} vs {name2}\n\n_Матч начинается..._",
+                    parse_mode="Markdown",
+                )
+                mid = msg.message_id
+            except Exception:
+                mid = None
+            anim_tasks.append(_run_match_animation(
+                bot=bot, chat_id=uid1, message_id=mid,
+                my_name=name1, opp_name=name2, my_uid=uid1,
+                stats=stats, r_delta=0, coins=0,
+                shared_moments=shared, after_kb=after_kb,
+            ))
+
+        elif is_bot1 and not is_bot2:
+            # uid2 is human, uid1 is bot
+            shared = _make_shared_moments_vs_bot(uid2, sa2, sa1, match_key)
+            all_moments.append((match_key, shared))
+            stats_b = {
+                **stats,
+                "score_a": stats["score_b"], "score_b": stats["score_a"],
+                "poss_a":  stats.get("poss_b", 50), "poss_b":  stats.get("poss_a", 50),
+                "shots_a": stats["shots_b"],  "shots_b": stats["shots_a"],
+                "passes_a":stats["passes_b"], "passes_b":stats["passes_a"],
+                "acc_a":   stats["acc_b"],    "acc_b":   stats["acc_a"],
+                "corners_a":stats["corners_b"],"corners_b":stats["corners_a"],
+            }
+            after_kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сетка", callback_data=f"fut_tour_bracket_{tour_id}")]])
+            try:
+                msg = await bot.send_message(
+                    chat_id=uid2,
+                    text=f"⚽ *Турнир {tour_id}* — {name1} vs {name2}\n\n_Матч начинается..._",
+                    parse_mode="Markdown",
+                )
+                mid = msg.message_id
+            except Exception:
+                mid = None
+            anim_tasks.append(_run_match_animation(
+                bot=bot, chat_id=uid2, message_id=mid,
+                my_name=name2, opp_name=name1, my_uid=uid2,
+                stats=stats_b, r_delta=0, coins=0,
+                shared_moments=shared, after_kb=after_kb,
+            ))
+        # else: both bots — no animation needed
+
+    # ── Run all animations in parallel, then continue ──────────────────────────
+    if anim_tasks:
+        await asyncio.gather(*anim_tasks, return_exceptions=True)
+
+    # Cleanup moments
+    for _, moment_list in all_moments:
+        for mc in moment_list:
+            _match_moments.pop(mc["moment_id"], None)
 
     matches[str(round_num)] = results
 
