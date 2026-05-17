@@ -2747,19 +2747,23 @@ async def cb_fut_market_buy_ok(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cb_fut_market_sell(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """^fut_market_sell$  — перенаправляем на страничный выбор"""
+    """^fut_market_sell$"""
     q = update.callback_query
-    q.data = "fut_market_sellp_0"
-    await cb_fut_market_sell_page(update, ctx)
+    await q.answer()
+    await _show_sell_page(update, ctx, offset=0)
 
 
 async def cb_fut_market_sell_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """^fut_market_sellp_(\d+)$"""
     q   = update.callback_query
     await q.answer()
-    uid = q.from_user.id
-
     offset = int(q.data[len("fut_market_sellp_"):])
+    await _show_sell_page(update, ctx, offset=offset)
+
+
+async def _show_sell_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE, offset: int) -> None:
+    q   = update.callback_query
+    uid = q.from_user.id
 
     # Карточки уже выставленные на рынок — исключаем
     my_listings = db.get_my_fut_listings(uid)
