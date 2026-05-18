@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from supabase import create_client, Client
-from config import SUPABASE_URL, SUPABASE_KEY, CALIBRATION_GAMES
+from config import SUPABASE_URL, SUPABASE_KEY, CALIBRATION_GAMES, CUBE_SUPABASE_URL, CUBE_SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -678,14 +678,13 @@ CROSS_FEE  = 0.10   # 10% комиссия сжигается
 
 
 def get_cube_client() -> "Client | None":
-    """Supabase клиент для Cubeasses DB. None если не настроен."""
+    """Supabase клиент для Cubeasses DB."""
     global _cube_client, _cube_client_url
-    url = _os.getenv("CUBE_SUPABASE_URL", "").strip()
-    key = _os.getenv("CUBE_SUPABASE_KEY", "").strip()
+    url = (CUBE_SUPABASE_URL or "").strip()
+    key = (CUBE_SUPABASE_KEY or "").strip()
     if not url or not key:
         logger.warning("CUBE_SUPABASE_URL or CUBE_SUPABASE_KEY not set — exchange disabled")
         return None
-    # пересоздаём клиент если URL изменился
     if _cube_client is None or _cube_client_url != url:
         logger.info("Creating Cubeasses Supabase client for url=%s", url[:40])
         _cube_client = create_client(url, key)

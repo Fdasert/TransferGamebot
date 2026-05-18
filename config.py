@@ -7,6 +7,13 @@ SUPABASE_KEY = os.getenv(
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdoaHNjd25jZHJtcnBvYmR5aHFrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3ODkzMjk0MCwiZXhwIjoyMDk0NTA4OTQwfQ.PUW0pibcZ9V2AwpqnHriKU9lkI8aavgO1VfkYRDpWJg",
 )
 
+# Cubeasses Supabase (кросс-бот обменник)
+CUBE_SUPABASE_URL = os.getenv("CUBE_SUPABASE_URL", "https://rjfbkkfoomcxedoncvwv.supabase.co")
+CUBE_SUPABASE_KEY = os.getenv(
+    "CUBE_SUPABASE_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqZmJra2Zvb21jeGVkb25jdnd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzIzNjQ2ODYsImV4cCI6MjA4Nzk0MDY4Nn0.VJn0eKVRM6qhnRZEwoZAHpf0GYDPJR8tduK8YS4-cGw",
+)
+
 SUPERADMIN_IDS: list[int] = [518544601]
 
 TRANSFERMARKT_API_URL = os.getenv("TRANSFERMARKT_API_URL", "http://localhost:8000")
