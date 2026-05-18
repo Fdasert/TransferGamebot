@@ -449,7 +449,7 @@ def _get_club_all(user_id: int) -> list[dict]:
         .table("user_club")
         .select(
             "id, acquired_at, "
-            "fut_players(id, name, club, nation, position, rating, version, pac, sho, pas, dri, def, phy)"
+            "fut_players(id, name, club, nation, league, position, rating, version, pac, sho, pas, dri, def, phy)"
         )
         .eq("user_id", user_id)
         .execute()
@@ -457,6 +457,9 @@ def _get_club_all(user_id: int) -> list[dict]:
     cards = []
     for row in (res.data or []):
         p = row.get("fut_players") or {}
+        # Exclude female players everywhere — club view, team, strength calc, etc.
+        if not _is_male_player(p):
+            continue
         cards.append({
             "club_id":  row["id"],
             "acquired": row.get("acquired_at", ""),
@@ -466,6 +469,7 @@ def _get_club_all(user_id: int) -> list[dict]:
             "position": p.get("position", "?"),
             "rating":   p.get("rating", 0),
             "version":  p.get("version", ""),
+            "league":   p.get("league", ""),
             "pac": p.get("pac", 0), "sho": p.get("sho", 0),
             "pas": p.get("pas", 0), "dri": p.get("dri", 0),
             "def": p.get("def", 0), "phy": p.get("phy", 0),
