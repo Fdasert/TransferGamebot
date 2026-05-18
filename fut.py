@@ -392,13 +392,39 @@ def _weighted_sample(pool: list[dict], n: int) -> list[dict]:
     return result
 
 
-# Женские лиги — исключаем из всех пулов карточек
-_FEMALE_LEAGUE_KEYWORDS = ("women", "frauen", "féminin", "feminin", "damen", "mujer", "damall")
+# Женские лиги и версии — исключаем из всех пулов карточек
+_FEMALE_LEAGUE_KEYWORDS = (
+    # league-name keywords (case-insensitive substring match)
+    "women", "woman", "female",
+    "frauen",                        # Frauen-Bundesliga (Germany)
+    "féminin", "feminin",            # Division 1 Féminin (France)
+    "damen",                         # various German
+    "mujer", "femenin",              # Spanish
+    "damall",                        # Damallsvenskan (Sweden)
+    "wsl",                           # Barclays WSL (England)
+    "nwsl",                          # NWSL (USA)
+    "liga f",                        # Liga F (Spain)
+    "uwcl",                          # Women's Champions League
+    "serie a w",                     # Serie A Women (Italy)
+    "d1 fém",                        # shorthand
+    "primera i",                     # Primera Iberdrola (Spain)
+    "a-league w",                    # A-League Women (Australia)
+    "kingsford",                     # NWSL variant
+    "roshn",                         # sometimes used in women's comps
+)
+_FEMALE_VERSION_KEYWORDS = (
+    "wfas", "wplayer", "w_player", "female", "women",
+)
 
 def _is_male_player(p: dict) -> bool:
-    """Return True if the player is NOT from a female league."""
-    league = (p.get("league") or "").lower()
-    return not any(kw in league for kw in _FEMALE_LEAGUE_KEYWORDS)
+    """Return True if the player is NOT from a female league or version."""
+    league  = (p.get("league")  or "").lower()
+    version = (p.get("version") or "").lower()
+    if any(kw in league  for kw in _FEMALE_LEAGUE_KEYWORDS):
+        return False
+    if any(kw in version for kw in _FEMALE_VERSION_KEYWORDS):
+        return False
+    return True
 
 
 def _draw_players(min_r: int, max_r: int, n: int) -> list[dict]:
@@ -4076,7 +4102,7 @@ def _draft_bot_sa(min_ovr: int, max_ovr: int) -> dict:
     """Build a random bot team SA by sampling fut_players in the OVR range."""
     res = (
         db.get_client().table("fut_players")
-        .select("position, pac, sho, pas, dri, def, phy, rating, league")
+        .select("position, pac, sho, pas, dri, def, phy, rating, league, version")
         .gte("rating", min_ovr).lte("rating", max_ovr)
         .execute()
     )
@@ -4488,7 +4514,7 @@ async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     if get_pack:
         res = (
             db.get_client().table("fut_players")
-            .select("id, name, rating, position, league")
+            .select("id, name, rating, position, league, version")
             .gte("rating", DRAFT_PACK_MIN_OVR)
             .execute()
         )
