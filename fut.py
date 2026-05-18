@@ -3996,7 +3996,7 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
         )
         return True
 
-    # ── FUT→Куб обменник ──────────────────────────────────────────────────────
+    # ── FUT→CUB обменник ──────────────────────────────────────────────────────
     if action == "fut_exchange_amount":
         try:
             amount = int(text.replace(" ", "").replace(",", ""))
@@ -4017,9 +4017,9 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
         db.clear_pending_action(uid)
         await update.message.reply_text(
             f"💰 *ПОДТВЕРЖДЕНИЕ КОНВЕРТАЦИИ*\n\n"
-            f"Потратишь: *{_fmt(amount)} FUT-монет*\n"
-            f"Получишь: *{_fmt(out)} Кубиков* (в Cubeasses-боте)\n"
-            f"Комиссия (сжигается): *{_fmt(comm)} Кубиков*\n\n"
+            f"Потратишь: *{_fmt(amount)} FUT*\n"
+            f"Получишь: *{_fmt(out)} CUB* (в Cubeasses-боте)\n"
+            f"Комиссия (сжигается): *{_fmt(comm)} CUB*\n\n"
             f"Твой баланс сейчас: *{_fmt(coins)} FUT*\n"
             f"После: *{_fmt(coins - amount)} FUT*",
             parse_mode="Markdown",
@@ -6042,24 +6042,24 @@ async def cb_fut_exchange_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     rate_out = int(300 / db.CROSS_RATE * (1 - db.CROSS_FEE))
     lines = [
         "🔄 *ОБМЕННИК*\n\n",
-        f"💰 Твои FUT-монеты: *{_fmt(coins)}*\n",
-        f"📈 Курс: {db.CROSS_RATE} FUT = 1 Кубик (комиссия {int(db.CROSS_FEE * 100)}%)\n",
-        f"💱 Пример: 300 FUT → *{rate_out} Кубиков*\n",
+        f"💰 Твои FUT: *{_fmt(coins)}*\n",
+        f"📈 Курс: {db.CROSS_RATE} FUT = 1 CUB (комиссия {int(db.CROSS_FEE * 100)}%)\n",
+        f"💱 Пример: 300 FUT → *{rate_out} CUB*\n",
     ]
     if pending_c2f:
         total = sum(t["amount_out"] for t in pending_c2f)
-        lines.append(f"\n✅ Готово к получению: *{_fmt(total)} FUT-монет*")
+        lines.append(f"\n✅ Готово к получению: *{_fmt(total)} FUT*")
     if pending_f2c:
         total = sum(t["amount_out"] for t in pending_f2c)
-        lines.append(f"\n⏳ Ожидает в Cubeasses: *{_fmt(total)} Кубиков* ({len(pending_f2c)} перев.)")
+        lines.append(f"\n⏳ Ожидает в Cubeasses: *{_fmt(total)} CUB* ({len(pending_f2c)} перев.)")
 
     rows = [
-        [InlineKeyboardButton("💰 FUT → Кубики", callback_data="fut_exchange_start_fut")],
+        [InlineKeyboardButton("💰 FUT → CUB", callback_data="fut_exchange_start_fut")],
     ]
     if pending_c2f:
         total = sum(t["amount_out"] for t in pending_c2f)
         rows.append([InlineKeyboardButton(
-            f"📥 Забрать Куб→FUT ({_fmt(total)} монет)",
+            f"📥 Забрать CUB→FUT ({_fmt(total)} FUT)",
             callback_data="fut_exchange_claim_c2f",
         )])
     if pending_f2c:
@@ -6077,7 +6077,7 @@ async def cb_fut_exchange_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
 
 async def cb_fut_exchange_start_fut(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """fut_exchange_start_fut — начать FUT→Кубики конвертацию."""
+    """fut_exchange_start_fut — начать FUT→CUB конвертацию."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -6089,10 +6089,10 @@ async def cb_fut_exchange_start_fut(update: Update, ctx: ContextTypes.DEFAULT_TY
 
     db.set_pending_action(uid, "fut_exchange_amount", {})
     await q.edit_message_text(
-        f"💰 *FUT-МОНЕТЫ → КУБИКИ*\n\n"
-        f"💰 Твой баланс: *{_fmt(coins)} FUT-монет*\n"
-        f"📈 Курс: {db.CROSS_RATE} FUT = 1 Кубик (комиссия {int(db.CROSS_FEE * 100)}%)\n\n"
-        f"Введи количество FUT-монет для конвертации:",
+        f"💰 *FUT → CUB*\n\n"
+        f"💰 Твой баланс: *{_fmt(coins)} FUT*\n"
+        f"📈 Курс: {db.CROSS_RATE} FUT = 1 CUB (комиссия {int(db.CROSS_FEE * 100)}%)\n\n"
+        f"Введи количество FUT для конвертации:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Отмена", callback_data="fut_exchange_menu"),
@@ -6101,7 +6101,7 @@ async def cb_fut_exchange_start_fut(update: Update, ctx: ContextTypes.DEFAULT_TY
 
 
 async def cb_fut_exchange_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """fut_exchange_confirm_<amount> — подтвердить FUT→Куб."""
+    """fut_exchange_confirm_<amount> — подтвердить FUT→CUB."""
     q      = update.callback_query
     await q.answer()
     uid    = q.from_user.id
@@ -6120,9 +6120,9 @@ async def cb_fut_exchange_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     out, comm = db._cross_calc_fut(amount, "fut_to_cube")
     await q.edit_message_text(
         f"✅ *ПЕРЕВОД СОЗДАН!*\n\n"
-        f"Потрачено: *{_fmt(amount)} FUT-монет*\n"
-        f"К получению: *{_fmt(out)} Кубиков*\n"
-        f"Комиссия сожжена: *{_fmt(comm)} Куб*\n\n"
+        f"Потрачено: *{_fmt(amount)} FUT*\n"
+        f"К получению: *{_fmt(out)} CUB*\n"
+        f"Комиссия сожжена: *{_fmt(comm)} CUB*\n\n"
         f"Перейди в Cubeasses-бот и нажми *🔄 Обменник → Забрать*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
@@ -6132,7 +6132,7 @@ async def cb_fut_exchange_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
 
 async def cb_fut_exchange_claim_c2f(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """fut_exchange_claim_c2f — забрать Куб→FUT переводы."""
+    """fut_exchange_claim_c2f — забрать CUB→FUT переводы."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -6145,8 +6145,8 @@ async def cb_fut_exchange_claim_c2f(update: Update, ctx: ContextTypes.DEFAULT_TY
     coins = db.get_coins(uid)
     await q.edit_message_text(
         f"✅ *МОНЕТЫ ПОЛУЧЕНЫ!*\n\n"
-        f"Зачислено: *{_fmt(total)} FUT-монет*\n"
-        f"Твой баланс: *{_fmt(coins)} FUT-монет*",
+        f"Зачислено: *{_fmt(total)} FUT*\n"
+        f"Твой баланс: *{_fmt(coins)} FUT*",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("◀ Обменник", callback_data="fut_exchange_menu"),
@@ -6155,7 +6155,7 @@ async def cb_fut_exchange_claim_c2f(update: Update, ctx: ContextTypes.DEFAULT_TY
 
 
 async def cb_fut_exchange_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """fut_exchange_pending — список ожидающих FUT→Куб переводов с отменой."""
+    """fut_exchange_pending — список ожидающих FUT→CUB переводов с отменой."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -6165,10 +6165,10 @@ async def cb_fut_exchange_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         await q.answer("Нет ожидающих переводов.", show_alert=True)
         return
 
-    lines = ["📋 *ОЖИДАЮЩИЕ ПЕРЕВОДЫ (FUT→Куб)*\n\n"]
+    lines = ["📋 *ОЖИДАЮЩИЕ ПЕРЕВОДЫ (FUT→CUB)*\n\n"]
     rows  = []
     for t in transfers:
-        lines.append(f"• {_fmt(t['amount_in'])} FUT → {_fmt(t['amount_out'])} Куб\n")
+        lines.append(f"• {_fmt(t['amount_in'])} FUT → {_fmt(t['amount_out'])} CUB\n")
         rows.append([InlineKeyboardButton(
             f"🚫 Отменить ({_fmt(t['amount_in'])} FUT)",
             callback_data=f"fut_exchange_cancel_{t['id']}",
@@ -6183,7 +6183,7 @@ async def cb_fut_exchange_pending(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
 
 async def cb_fut_exchange_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """fut_exchange_cancel_<id> — отменить FUT→Куб перевод."""
+    """fut_exchange_cancel_<id> — отменить FUT→CUB перевод."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
