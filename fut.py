@@ -392,15 +392,25 @@ def _weighted_sample(pool: list[dict], n: int) -> list[dict]:
     return result
 
 
+# Женские лиги — исключаем из всех пулов карточек
+_FEMALE_LEAGUE_KEYWORDS = ("women", "frauen", "féminin", "feminin", "damen", "mujer", "damall")
+
+def _is_male_player(p: dict) -> bool:
+    """Return True if the player is NOT from a female league."""
+    league = (p.get("league") or "").lower()
+    return not any(kw in league for kw in _FEMALE_LEAGUE_KEYWORDS)
+
+
 def _draw_players(min_r: int, max_r: int, n: int) -> list[dict]:
     res = (
         db.get_client()
         .table("fut_players")
-        .select("id, name, club, nation, position, rating, version, pac, sho, pas, dri, def, phy")
+        .select("id, name, club, nation, position, rating, version, pac, sho, pas, dri, def, phy, league")
         .gte("rating", min_r).lte("rating", max_r)
         .execute()
     )
-    return _weighted_sample(res.data or [], n)
+    pool = [p for p in (res.data or []) if _is_male_player(p)]
+    return _weighted_sample(pool, n)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2051,6 +2061,8 @@ async def _run_match_animation(
     await asyncio.sleep(2.0)
 
     # ── 1-й тайм — 25' ─────────────────────────────────────────────────────────
+    # Score stays 0:0 — pre-simulated goals are only revealed at halftime.
+    # This prevents the "score appears from nowhere" effect.
     early_evs = [(m, t) for m, t in h1_events if m <= 25]
     shown = "\n".join(t for _, t in early_evs[-2:]) if early_evs else "_Осторожный старт..._"
     await _show(
@@ -2061,41 +2073,51 @@ async def _run_match_animation(
     await asyncio.sleep(2.0)
 
     # ── Интерактив 1-го тайма ─────────────────────────────────────────────────
+    inter_h1_a = inter_h1_b = 0
     for m_cfg in h1_moments:
         b, (da, db) = await _interactive_shared(m_cfg)
         bonus_total += b
-        score_a += da
-        score_b += db
+        score_a += da; score_b += db
+        inter_h1_a += da; inter_h1_b += db
 
-    # ── 1-й тайм — 40' ─────────────────────────────────────────────────────────
+    # Actual halftime score = pre-simulated h1 + interactive h1 goals
+    ht_a = h1_a + inter_h1_a
+    ht_b = h1_b + inter_h1_b
+
+    # ── 1-й тайм — 40' (без счёта — раскрываем только на перерыве) ───────────
     late_h1 = [(m, t) for m, t in h1_events if 25 < m <= 45]
     if late_h1:
         shown2 = "\n".join(t for _, t in late_h1[-2:])
         await _show(
             f"⏱ *1-й тайм — 40:00*\n\n"
-            f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
+            f"🔵 *{my_name}*  *?* : *?*  🔴 *{opp_name}*\n\n"
             f"{shown2}"
         )
         await asyncio.sleep(1.8)
 
-    # ── Перерыв — 45' ─────────────────────────────────────────────────────────
+    # ── Перерыв — 45' — РАСКРЫВАЕМ СЧЁТ 1-го тайма ───────────────────────────
+    ht_lead = ""
+    if ht_a > ht_b:
+        ht_lead = f"\n🔵 *{my_name}* ведёт!"
+    elif ht_b > ht_a:
+        ht_lead = f"\n🔴 *{opp_name}* ведёт!"
     await _show(
         f"🕐 *Перерыв — 45'*\n\n"
-        f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
+        f"🔵 *{my_name}*  *{ht_a}* : *{ht_b}*  🔴 *{opp_name}*{ht_lead}\n\n"
         f"📊 Владение 1-го тайма: *{poss_a}%* — *{poss_b}%*\n"
         f"_Команды уходят в раздевалку..._"
     )
     await asyncio.sleep(2.2)
 
     # ── 2-й тайм — 45' ─────────────────────────────────────────────────────────
-    if score_a != score_b:
-        leading = my_name if score_a > score_b else opp_name
+    if ht_a != ht_b:
+        leading = my_name if ht_a > ht_b else opp_name
         tension = f"_{leading} ведёт! Нужно отыгрываться..._"
     else:
         tension = "_Равная борьба — всё решится сейчас!_"
     await _show(
         f"⏱ *2-й тайм — 45:00*\n\n"
-        f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
+        f"🔵 *{my_name}*  *{ht_a}* : *{ht_b}*  🔴 *{opp_name}*\n\n"
         f"{tension}"
     )
     await asyncio.sleep(2.0)
@@ -2106,7 +2128,7 @@ async def _run_match_animation(
         shown3 = "\n".join(t for _, t in mid2_evs[-2:])
         await _show(
             f"⏱ *2-й тайм — 65:00*\n\n"
-            f"🔵 *{my_name}*  *{h1_a}* : *{h1_b}*  🔴 *{opp_name}*\n\n"
+            f"🔵 *{my_name}*  *{ht_a}* : *{ht_b}*  🔴 *{opp_name}*\n\n"
             f"{shown3}"
         )
         await asyncio.sleep(2.0)
@@ -2115,8 +2137,7 @@ async def _run_match_animation(
     for m_cfg in h2_moments:
         b, (da, db) = await _interactive_shared(m_cfg)
         bonus_total += b
-        score_a += da
-        score_b += db
+        score_a += da; score_b += db
 
     # ── Концовка — 80'+ ───────────────────────────────────────────────────────
     late2_evs = [(m, t) for m, t in h2_events if m > 65]
@@ -3780,12 +3801,12 @@ def _draft_get_options(group: str, exclude_ids: set[int]) -> list[dict]:
     valid_positions = DRAFT_POS_MAP.get(group, [])
     res = (
         db.get_client().table("fut_players")
-        .select("id, name, club, nation, position, rating, version, pac, sho, pas, dri, def, phy")
+        .select("id, name, club, nation, position, rating, version, pac, sho, pas, dri, def, phy, league")
         .gte("rating", DRAFT_MIN_OVR)
         .in_("position", valid_positions)
         .execute()
     )
-    players = [p for p in (res.data or []) if p["id"] not in exclude_ids]
+    players = [p for p in (res.data or []) if p["id"] not in exclude_ids and _is_male_player(p)]
     return random.sample(players, min(DRAFT_PICK_N, len(players)))
 
 
@@ -3847,11 +3868,11 @@ def _draft_bot_sa(min_ovr: int, max_ovr: int) -> dict:
     """Build a random bot team SA by sampling fut_players in the OVR range."""
     res = (
         db.get_client().table("fut_players")
-        .select("position, pac, sho, pas, dri, def, phy, rating")
+        .select("position, pac, sho, pas, dri, def, phy, rating, league")
         .gte("rating", min_ovr).lte("rating", max_ovr)
         .execute()
     )
-    players = res.data or []
+    players = [p for p in (res.data or []) if _is_male_player(p)]
     if not players:
         return {"att": min_ovr - 5, "def_": min_ovr - 5, "ovr": min_ovr,
                 "chem": 60, "placed": 11,
@@ -4257,11 +4278,11 @@ async def cb_fut_draft_reward(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     if get_pack:
         res = (
             db.get_client().table("fut_players")
-            .select("id, name, rating, position")
+            .select("id, name, rating, position, league")
             .gte("rating", DRAFT_PACK_MIN_OVR)
             .execute()
         )
-        pack_pool = res.data or []
+        pack_pool = [p for p in (res.data or []) if _is_male_player(p)]
         if pack_pool:
             pack_cards = random.sample(pack_pool, min(DRAFT_PACK_CARDS, len(pack_pool)))
             _add_to_club(uid, [c["id"] for c in pack_cards])
