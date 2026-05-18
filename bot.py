@@ -62,6 +62,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("❓ Помощь", callback_data="menu_help")],
         [InlineKeyboardButton("🎰 Казино", callback_data="casino_menu"),
          InlineKeyboardButton("⚽ FUT Клуб", callback_data="fut_menu")],
+        [InlineKeyboardButton("🔄 Обменник", callback_data="fut_exchange_menu")],
     ])
 
 

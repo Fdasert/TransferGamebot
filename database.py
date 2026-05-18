@@ -664,3 +664,144 @@ def apply_elo_result(
         calibration_games=cal_b,
         is_calibrated=is_cal_b,
     )
+
+
+# ── Cubeasses Supabase (кросс-бот обменник) ──────────────────────────────────
+
+import os as _os
+
+_CUBE_URL = _os.getenv("CUBE_SUPABASE_URL", "")
+_CUBE_KEY = _os.getenv("CUBE_SUPABASE_KEY", "")
+_cube_client: "Client | None" = None
+
+CROSS_RATE = 3      # 1 Кубик = 3 FUT-монеты
+CROSS_FEE  = 0.10   # 10% комиссия сжигается
+
+
+def get_cube_client() -> "Client | None":
+    """Supabase клиент для Cubeasses DB. None если не настроен."""
+    global _cube_client
+    if _CUBE_URL and _CUBE_KEY and _cube_client is None:
+        _cube_client = create_client(_CUBE_URL, _CUBE_KEY)
+    return _cube_client if (_CUBE_URL and _CUBE_KEY) else None
+
+
+def _cross_calc_fut(amount_in: int, direction: str) -> tuple[int, int]:
+    """Возвращает (amount_out, commission) для конвертации в FUT-боте."""
+    if direction == "fut_to_cube":
+        gross      = amount_in / CROSS_RATE
+        commission = max(0, round(gross * CROSS_FEE))
+        return max(1, int(gross) - int(commission)), int(commission)
+    else:  # cube_to_fut (для отображения)
+        gross      = amount_in * CROSS_RATE
+        commission = max(1, round(gross * CROSS_FEE))
+        return gross - commission, commission
+
+
+def create_fut_to_cube_transfer(user_id: int, amount_in: int) -> tuple[bool, int, str]:
+    """
+    FUT→Куб: списывает FUT-монеты, создаёт pending-запись в Cubeasses Supabase.
+    Возвращает (ok, transfer_id, error).
+    """
+    cc = get_cube_client()
+    if not cc:
+        return False, 0, "Обменник временно недоступен. Обратитесь к администратору."
+    if amount_in <= 0:
+        return False, 0, "Сумма должна быть положительной."
+
+    amount_out, commission = _cross_calc_fut(amount_in, "fut_to_cube")
+
+    ok, _ = spend_coins(user_id, amount_in)
+    if not ok:
+        return False, 0, "Недостаточно FUT-монет."
+
+    r = cc.table("cross_transfers").insert({
+        "user_id":    user_id,
+        "direction":  "fut_to_cube",
+        "amount_in":  amount_in,
+        "commission": commission,
+        "amount_out": amount_out,
+        "status":     "pending",
+    }).execute()
+    if not r.data:
+        add_coins(user_id, amount_in)  # возвращаем монеты при ошибке БД
+        return False, 0, "Ошибка базы данных."
+    return True, r.data[0]["id"], ""
+
+
+def get_cube_to_fut_pending(user_id: int) -> list[dict]:
+    """Pending cube_to_fut переводы (забрать в FUT-боте)."""
+    cc = get_cube_client()
+    if not cc:
+        return []
+    r = (
+        cc.table("cross_transfers")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("direction", "cube_to_fut")
+        .eq("status", "pending")
+        .order("created_at")
+        .execute()
+    )
+    return r.data or []
+
+
+def claim_cube_to_fut(user_id: int) -> tuple[bool, int, str]:
+    """Забирает pending cube_to_fut переводы: добавляет FUT-монеты, маркирует claimed."""
+    import datetime as _dt
+    cc = get_cube_client()
+    if not cc:
+        return False, 0, "Обменник временно недоступен."
+    transfers = get_cube_to_fut_pending(user_id)
+    if not transfers:
+        return False, 0, "Нет ожидающих переводов."
+
+    total_out = sum(int(t["amount_out"]) for t in transfers)
+    ids       = [t["id"] for t in transfers]
+    now_iso   = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    cc.table("cross_transfers").update({
+        "status":     "claimed",
+        "claimed_at": now_iso,
+    }).in_("id", ids).execute()
+
+    add_coins(user_id, total_out)
+    return True, total_out, ""
+
+
+def get_fut_to_cube_pending(user_id: int) -> list[dict]:
+    """Pending fut_to_cube переводы (для отображения в меню FUT-бота)."""
+    cc = get_cube_client()
+    if not cc:
+        return []
+    r = (
+        cc.table("cross_transfers")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("direction", "fut_to_cube")
+        .eq("status", "pending")
+        .order("created_at")
+        .execute()
+    )
+    return r.data or []
+
+
+def cancel_fut_to_cube_transfer(transfer_id: int, user_id: int) -> tuple[bool, str]:
+    """Отменяет pending fut_to_cube перевод и возвращает FUT-монеты."""
+    cc = get_cube_client()
+    if not cc:
+        return False, "Обменник временно недоступен."
+    r = (
+        cc.table("cross_transfers")
+        .select("*")
+        .eq("id", transfer_id)
+        .eq("user_id", user_id)
+        .eq("status", "pending")
+        .execute()
+    )
+    if not r.data:
+        return False, "Перевод не найден."
+    t = r.data[0]
+    cc.table("cross_transfers").update({"status": "expired"}).eq("id", transfer_id).execute()
+    add_coins(user_id, int(t["amount_in"]))  # возвращаем FUT-монеты
+    return True, ""
