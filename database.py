@@ -670,20 +670,27 @@ def apply_elo_result(
 
 import os as _os
 
-_CUBE_URL = _os.getenv("CUBE_SUPABASE_URL", "")
-_CUBE_KEY = _os.getenv("CUBE_SUPABASE_KEY", "")
 _cube_client: "Client | None" = None
+_cube_client_url: str = ""
 
-CROSS_RATE = 3      # 1 Кубик = 3 FUT-монеты
+CROSS_RATE = 3      # 1 CUB = 3 FUT
 CROSS_FEE  = 0.10   # 10% комиссия сжигается
 
 
 def get_cube_client() -> "Client | None":
     """Supabase клиент для Cubeasses DB. None если не настроен."""
-    global _cube_client
-    if _CUBE_URL and _CUBE_KEY and _cube_client is None:
-        _cube_client = create_client(_CUBE_URL, _CUBE_KEY)
-    return _cube_client if (_CUBE_URL and _CUBE_KEY) else None
+    global _cube_client, _cube_client_url
+    url = _os.getenv("CUBE_SUPABASE_URL", "").strip()
+    key = _os.getenv("CUBE_SUPABASE_KEY", "").strip()
+    if not url or not key:
+        logger.warning("CUBE_SUPABASE_URL or CUBE_SUPABASE_KEY not set — exchange disabled")
+        return None
+    # пересоздаём клиент если URL изменился
+    if _cube_client is None or _cube_client_url != url:
+        logger.info("Creating Cubeasses Supabase client for url=%s", url[:40])
+        _cube_client = create_client(url, key)
+        _cube_client_url = url
+    return _cube_client
 
 
 def _cross_calc_fut(amount_in: int, direction: str) -> tuple[int, int]:
