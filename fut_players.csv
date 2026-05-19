@@ -1,0 +1,267 @@
+futbin_id,name,club,nation,league,rating,version,position,pac,sho,pas,dri,def,phy
+f19_497,Douglas Costa,Juventus,Brazil,Serie A TIM,86,Gold,LM,95,75,81,91,43,65
+f19_498,Alex Sandro,Juventus,Brazil,Serie A TIM,86,Gold,LB,85,65,77,81,82,83
+f19_500,Leonardo Bonucci,Juventus,Italy,Serie A TIM,86,Gold,CB,61,58,69,71,87,80
+f19_501,Medhi Benatia,Juventus,Morocco,Serie A TIM,86,Gold,CB,70,45,54,65,87,85
+f19_502,Miralem Pjanic,Juventus,Bosnia and Herzegovina,Serie A TIM,86,Gold,CM,66,70,86,86,73,69
+f19_504,Nemanja Matic,Manchester United,Serbia,Premier League,86,Gold,CDM,56,71,79,76,83,83
+f19_507,Ederson,Manchester City,Brazil,Premier League,86,Gold,GK,85,80,90,87,64,82
+f19_509,Fernandinho,Manchester City,Brazil,Premier League,86,Gold,CDM,67,74,78,79,83,79
+f19_510,Leroy Sané,Manchester City,Germany,Premier League,86,Gold,LW,95,81,78,86,38,70
+f19_511,Nicolás Otamendi,Manchester City,Argentina,Premier League,86,Gold,CB,60,57,63,61,86,80
+f19_513,Azpilicueta,Chelsea,Spain,Premier League,86,Gold,CB,76,55,78,74,87,77
+f19_514,Jérôme Boateng,FC Bayern München,Germany,Bundesliga,86,Gold,CB,73,50,72,66,85,83
+f19_515,Thiago,FC Bayern München,Spain,Bundesliga,86,Gold,CM,73,74,84,89,67,63
+f19_517,Thomas Müller,FC Bayern München,Germany,Bundesliga,86,Gold,CF,74,83,80,78,50,71
+f19_521,Roberto Firmino,Liverpool,Brazil,Premier League,86,Gold,CF,77,83,80,86,61,78
+f19_523,Sadio Mané,Liverpool,Senegal,Premier League,86,Gold,LW,94,80,76,87,42,73
+f19_527,Mesut Özil,Arsenal,Germany,Premier League,86,Gold,CAM,70,73,86,84,24,58
+f19_529,Raphaël Varane,Real Madrid,France,LaLiga Santander,86,Gold,CB,84,45,61,65,86,80
+f19_532,Marco Verratti,Paris Saint-Germain,Italy,Ligue 1 Conforama,86,Gold,CM,65,60,84,89,79,66
+f19_540,Ivan Perišic,Inter,Croatia,Serie A TIM,86,Gold,LM,86,80,80,83,62,78
+f19_542,Naldo,FC Schalke 04,Brazil,Bundesliga,86,Gold,CB,63,69,64,62,87,74
+f19_544,Parejo,Valencia CF,Spain,LaLiga Santander,86,Gold,CM,47,80,88,79,71,71
+f19_642,Naldo,AS Monaco Football Club SA,Brazil,Ligue 1 Conforama,86,Gold,CB,63,69,64,62,87,74
+f19_643,Joelinton,TSG 1899 Hoffenheim,Brazil,Bundesliga,86,Gold,ST,87,85,73,85,45,84
+f19_646,Allan Saint-Maximin,OGC Nice,France,Ligue 1 Conforama,86,Gold,RW,96,85,85,90,28,68
+f19_668,Sami Khedira,Juventus,Germany,Serie A TIM,85,Gold,CM,57,76,80,78,81,83
+f19_671,Blaise Matuidi,Juventus,France,Serie A TIM,85,Gold,CDM,78,68,77,79,83,83
+f19_672,Marco Reus,Borussia Dortmund,Germany,Bundesliga,85,Gold,LM,85,86,82,86,44,64
+f19_674,Raheem Sterling,Manchester City,England,Premier League,85,Gold,RW,93,73,76,87,47,56
+f19_675,Vincent Kompany,Manchester City,Belgium,Premier League,85,Gold,CB,56,54,65,66,85,81
+f19_676,Riyad Mahrez,Manchester City,Algeria,Premier League,85,Gold,RW,85,79,81,90,37,59
+f19_679,Arturo Vidal,FC Barcelona,Chile,LaLiga Santander,85,Gold,CDM,57,80,79,78,84,83
+f19_681,Joshua Kimmich,FC Bayern München,Germany,Bundesliga,85,Gold,RB,73,68,83,82,77,73
+f19_682,Arjen Robben,FC Bayern München,Holland,Bundesliga,85,Gold,RM,79,85,81,88,32,62
+f19_683,Franck Ribéry,FC Bayern München,France,Bundesliga,85,Gold,LM,78,76,82,88,30,57
+f19_684,David Alaba,FC Bayern München,Austria,Bundesliga,85,Gold,LB,82,73,80,80,81,75
+f19_687,Virgil van Dijk,Liverpool,Holland,Premier League,85,Gold,CB,71,60,67,70,85,84
+f19_688,Fabinho,Liverpool,Brazil,Premier League,85,Gold,CDM,71,69,78,77,84,84
+f19_689,Alisson,Liverpool,Brazil,Premier League,85,Gold,GK,82,81,85,88,54,83
+f19_693,Toby Alderweireld,Tottenham Hotspur,Belgium,Premier League,85,Gold,CB,62,57,72,66,88,78
+f19_696,Marco Asensio,Real Madrid,Spain,LaLiga Santander,85,Gold,LW,81,84,83,85,43,60
+f19_700,Yacine Brahimi,FC Porto,Algeria,Liga NOS,85,Gold,LM,80,75,78,90,41,59
+f19_702,Kostas Manolas,Roma,Greece,Serie A TIM,85,Gold,CB,83,18,42,62,86,82
+f19_703,Edin Džeko,Roma,Bosnia and Herzegovina,Serie A TIM,85,Gold,ST,66,85,71,75,46,73
+f19_706,Diego Costa,Atlético Madrid,Spain,LaLiga Santander,85,Gold,ST,75,83,64,76,49,87
+f19_708,Koke,Atlético Madrid,Spain,LaLiga Santander,85,Gold,LM,69,75,88,82,69,78
+f19_709,Saúl,Atlético Madrid,Spain,LaLiga Santander,85,Gold,CM,70,77,79,82,78,76
+f19_710,Filipe Luís,Atlético Madrid,Brazil,LaLiga Santander,85,Gold,LB,75,62,78,79,81,79
+f19_711,Sergej Milinkovic-Savic,Lazio,Serbia,Serie A TIM,85,Gold,CM,69,79,80,82,77,84
+f19_713,Falcao,AS Monaco Football Club SA,Colombia,Ligue 1 Conforama,85,Gold,ST,67,84,69,78,43,74
+f19_714,Miranda,Inter,Brazil,Serie A TIM,85,Gold,CB,68,49,60,69,88,76
+f19_715,Radja Nainggolan,Inter,Belgium,Serie A TIM,85,Gold,CM,75,79,78,82,83,83
+f19_716,Milan Škriniar,Inter,Slovakia,Serie A TIM,85,Gold,CB,72,41,57,62,87,82
+f19_718,Pepe,Beşiktaş JK,Portugal,Süper Lig,85,Gold,CB,68,51,57,62,85,81
+f19_719,Iago Aspas,RC Celta,Spain,LaLiga Santander,85,Gold,RW,81,86,77,86,35,65
+f19_721,Nabil Fekir,Olympique Lyonnais,France,Ligue 1 Conforama,85,Gold,CAM,79,82,81,89,33,79
+f19_724,Zlatan Ibrahimovic,LA Galaxy,Sweden,Major League Soccer,85,Gold,ST,59,86,77,79,34,78
+f19_726,Paulinho,Guangzhou Evergrande Taobao,Brazil,CSL,85,Gold,CM,73,81,77,81,79,84
+f19_761,Pepe,FC Porto,Portugal,Liga NOS,85,Gold,CB,68,51,57,62,85,81
+f19_766,Mario Mandžukic,Juventus,Croatia,Serie A TIM,84,Gold,ST,70,78,71,75,66,85
+f19_767,Andrea Barzagli,Juventus,Italy,Serie A TIM,84,Gold,CB,68,34,57,65,89,72
+f19_768,Mattia Perin,Juventus,Italy,Serie A TIM,84,Gold,GK,81,85,71,90,57,79
+f19_769,Juan Cuadrado,Juventus,Colombia,Serie A TIM,84,Gold,RM,91,74,77,87,66,69
+f19_770,Wojciech Szczesny,Juventus,Poland,Serie A TIM,84,Gold,GK,85,81,71,87,51,82
+f19_775,Bernardo Silva,Manchester City,Portugal,Premier League,84,Gold,RW,78,72,83,89,46,58
+f19_776,Ilkay Gündogan,Manchester City,Germany,Premier League,84,Gold,CM,68,74,83,84,69,70
+f19_778,Kyle Walker,Manchester City,England,Premier League,84,Gold,RB,90,63,75,77,81,80
+f19_779,Sergi Roberto,FC Barcelona,Spain,LaLiga Santander,84,Gold,RB,78,63,81,77,80,71
+f19_781,Luiz Frello Filho Jorge,Chelsea,Italy,Premier League,84,Gold,CM,72,64,84,82,69,71
+f19_782,Cesc Fàbregas,Chelsea,Spain,Premier League,84,Gold,CM,55,74,88,80,60,58
+f19_783,Willian,Chelsea,Brazil,Premier League,84,Gold,RW,88,77,80,86,49,62
+f19_785,Niklas Süle,FC Bayern München,Germany,Bundesliga,84,Gold,CB,67,41,52,50,83,82
+f19_787,Javi Martinez,FC Bayern München,Spain,Bundesliga,84,Gold,CDM,51,55,70,65,86,83
+f19_790,Moussa Dembélé,Tottenham Hotspur,Belgium,Premier League,84,Gold,CM,72,70,77,87,78,82
+f19_791,Heung Min Son,Tottenham Hotspur,Korea Republic,Premier League,84,Gold,LM,86,85,76,85,42,68
+f19_792,Dele Alli,Tottenham Hotspur,England,Premier League,84,Gold,CAM,75,81,78,82,65,78
+f19_793,Davinson Sánchez,Tottenham Hotspur,Colombia,Premier League,84,Gold,CB,76,45,55,67,84,82
+f19_794,Henrikh Mkhitaryan,Arsenal,Armenia,Premier League,84,Gold,CAM,82,78,79,85,52,69
+f19_795,Alexandre Lacazette,Arsenal,France,Premier League,84,Gold,ST,81,82,72,84,40,72
+f19_796,Sokratis,Arsenal,Greece,Premier League,84,Gold,CB,69,51,50,61,84,82
+f19_797,Bernd Leno,Arsenal,Germany,Premier League,84,Gold,GK,84,82,73,82,46,85
+f19_799,Carvajal,Real Madrid,Spain,LaLiga Santander,84,Gold,RB,82,45,73,79,82,78
+f19_800,Karim Benzema,Real Madrid,France,LaLiga Santander,84,Gold,ST,76,79,76,81,32,75
+f19_802,Raúl Albiol,Napoli,Spain,Serie A TIM,84,Gold,CB,53,41,61,64,86,75
+f19_803,José Callejón,Napoli,Spain,Serie A TIM,84,Gold,RW,88,78,75,83,47,65
+f19_806,Alex Telles,FC Porto,Brazil,Liga NOS,84,Gold,LB,85,71,83,80,80,77
+f19_808,Marquinhos,Paris Saint-Germain,Brazil,Ligue 1 Conforama,84,Gold,CB,75,38,69,68,85,76
+f19_809,Ángel Di María,Paris Saint-Germain,Argentina,Ligue 1 Conforama,84,Gold,RW,85,76,82,85,47,66
+f19_813,José María Giménez,Atlético Madrid,Uruguay,LaLiga Santander,84,Gold,CB,68,45,51,53,86,82
+f19_817,Lukáš Hrádecký,Bayer 04 Leverkusen,Finland,Bundesliga,84,Gold,GK,85,79,68,88,38,82
+f19_818,Illarramendi,Real Sociedad,Spain,LaLiga Santander,84,Gold,CM,61,71,80,79,70,72
+f19_819,Sergio Asenjo,Villarreal CF,Spain,LaLiga Santander,84,Gold,GK,85,83,77,84,59,82
+f19_821,Jonas,SL Benfica,Brazil,Liga NOS,84,Gold,ST,64,86,77,84,38,65
+f19_825,Stefan de Vrij,Inter,Holland,Serie A TIM,84,Gold,CB,68,41,60,67,86,76
+f19_826,Quaresma,Beşiktaş JK,Portugal,Süper Lig,84,Gold,RM,83,74,82,88,24,62
+f19_827,Kasper Schmeichel,Leicester City,Denmark,Premier League,84,Gold,GK,83,77,82,88,60,80
+f19_830,Lopes,Olympique Lyonnais,Portugal,Ligue 1 Conforama,84,Gold,GK,86,80,74,87,63,81
+f19_831,William Carvalho,Real Betis,Portugal,LaLiga Santander,84,Gold,CDM,51,55,79,76,82,84
+f19_832,Neto,Valencia CF,Brazil,LaLiga Santander,84,Gold,GK,86,84,79,82,53,78
+f19_833,Rodrigo,Valencia CF,Spain,LaLiga Santander,84,Gold,ST,90,81,73,82,44,71
+f19_834,Dimitri Payet,Olympique de Marseille,France,Ligue 1 Conforama,84,Gold,CAM,73,77,85,85,38,68
+f19_835,Florian Thauvin,Olympique de Marseille,France,Ligue 1 Conforama,84,Gold,RM,83,80,81,84,42,69
+f19_836,Alejandro Gómez,Atalanta,Argentina,Serie A TIM,84,Gold,CF,90,76,81,88,39,57
+f19_837,Stéphane Ruffier,AS Saint-Étienne,France,Ligue 1 Conforama,84,Gold,GK,82,84,77,82,45,85
+f19_941,Cesc Fàbregas,AS Monaco Football Club SA,Spain,Ligue 1 Conforama,84,Gold,CM,55,74,88,80,60,58
+f19_952,Shinji Kagawa,Borussia Dortmund,Japan,Bundesliga,83,Gold,CAM,68,69,78,86,54,49
+f19_957,Anthony Martial,Manchester United,France,Premier League,83,Gold,LW,89,81,73,86,42,72
+f19_959,Juan Mata,Manchester United,Spain,Premier League,83,Gold,RM,65,76,84,85,37,50
+f19_963,Cesc Fàbregas,AS Monaco Football Club SA,Spain,Ligue 1 Conforama,84,Gold,CM,55,74,88,80,60,58
+f19_977,Shinji Kagawa,Borussia Dortmund,Japan,Bundesliga,83,Gold,CAM,68,69,78,86,54,49
+f19_982,Anthony Martial,Manchester United,France,Premier League,83,Gold,LW,89,81,73,86,42,72
+f19_984,Juan Mata,Manchester United,Spain,Premier League,83,Gold,RM,65,76,84,85,37,50
+f19_985,Aymeric Laporte,Manchester City,France,Premier League,83,Gold,CB,65,50,67,62,85,76
+f19_987,Gabriel Jesus,Manchester City,Brazil,Premier League,83,Gold,ST,86,80,72,86,39,73
+f19_989,Malcom,FC Barcelona,Brazil,LaLiga Santander,83,Gold,RW,84,79,81,85,27,64
+f19_990,Danilo Pereira,FC Porto,Portugal,Liga NOS,83,Gold,CDM,66,64,70,74,82,86
+f19_991,Felipe,FC Porto,Brazil,Liga NOS,83,Gold,CB,64,41,58,60,83,85
+f19_997,Daniele De Rossi,Roma,Italy,Serie A TIM,83,Gold,CDM,65,63,73,70,85,80
+f19_999,Presnel Kimpembe,Paris Saint-Germain,France,Ligue 1 Conforama,83,Gold,CB,77,39,67,68,82,83
+f19_1000,Julian Draxler,Paris Saint-Germain,Germany,Ligue 1 Conforama,83,Gold,CM,77,80,82,86,55,64
+f19_1003,Adrien Rabiot,Paris Saint-Germain,France,Ligue 1 Conforama,83,Gold,CM,74,74,79,80,77,79
+f19_1004,Adán,Atlético Madrid,Spain,LaLiga Santander,83,Gold,GK,81,84,78,83,56,84
+f19_1005,Thomas Lemar,Atlético Madrid,France,LaLiga Santander,83,Gold,LM,85,76,83,85,59,67
+f19_1007,Stefan Savic,Atlético Madrid,Montenegro,LaLiga Santander,83,Gold,CB,58,35,54,58,84,74
+f19_1011,Lucas Leiva,Lazio,Brazil,Serie A TIM,83,Gold,CDM,67,66,76,78,82,75
+f19_1012,Jonathan Tah,Bayer 04 Leverkusen,Germany,Bundesliga,83,Gold,CB,71,27,58,59,83,81
+f19_1013,Willian José,Real Sociedad,Brazil,LaLiga Santander,83,Gold,ST,64,83,66,77,40,80
+f19_1014,Quincy Promes,Sevilla FC,Holland,LaLiga Santander,83,Gold,LM,90,83,78,83,32,67
+f19_1015,Éver Banega,Sevilla FC,Argentina,LaLiga Santander,83,Gold,CAM,66,70,86,83,69,68
+f19_1016,Manu Trigueros,Villarreal CF,Spain,LaLiga Santander,83,Gold,CM,70,74,81,81,70,69
+f19_1017,Gerard Moreno,Villarreal CF,Spain,LaLiga Santander,83,Gold,ST,79,81,66,78,45,69
+f19_1019,Pizzi,SL Benfica,Portugal,Liga NOS,83,Gold,CM,77,76,82,81,64,69
+f19_1021,Kamil Glik,AS Monaco Football Club SA,Poland,Ligue 1 Conforama,83,Gold,CB,51,32,44,54,83,84
+f19_1022,Danijel Subašic,AS Monaco Football Club SA,Croatia,Ligue 1 Conforama,83,Gold,GK,82,80,79,84,51,82
+f19_1023,Oliver Baumann,TSG 1899 Hoffenheim,Germany,Bundesliga,83,Gold,GK,82,82,70,85,47,82
+f19_1025,Aduriz,Athletic Club,Spain,LaLiga Santander,83,Gold,ST,67,82,64,75,50,81
+f19_1026,Ralf Fährmann,FC Schalke 04,Germany,Bundesliga,83,Gold,GK,83,81,52,87,38,82
+f19_1027,Memphis Depay,Olympique Lyonnais,Holland,Ligue 1 Conforama,83,Gold,ST,88,81,78,83,33,79
+f19_1033,Quincy Promes,Spartak Moscow,Holland,League of Russia,83,Gold,LM,90,83,78,83,32,67
+f19_1034,Timo Werner,RB Leipzig,Germany,Bundesliga,83,Gold,ST,93,79,67,82,35,67
+f19_1035,Kevin Strootman,Olympique de Marseille,Holland,Ligue 1 Conforama,83,Gold,CM,66,72,81,77,79,80
+f19_1036,Luiz Gustavo,Olympique de Marseille,Brazil,Ligue 1 Conforama,83,Gold,CDM,64,60,71,70,82,83
+f19_1037,Steve Mandanda,Olympique de Marseille,France,Ligue 1 Conforama,83,Gold,GK,86,81,70,84,53,79
+f19_1041,Mario Balotelli,OGC Nice,Italy,Ligue 1 Conforama,83,Gold,ST,79,84,73,79,24,77
+f19_1042,Timo Horn,1. FC Köln,Germany,Bundesliga 2,83,Gold,GK,83,80,83,86,45,82
+f19_1045,Rui Patrício,Wolverhampton Wanderers,Portugal,Premier League,83,Gold,GK,85,81,80,82,53,79
+f19_1049,Giuliano,Al Nassr,Brazil,Saudi Professional League,83,Gold,CAM,82,78,79,84,46,75
+f19_1050,Yannick Carrasco,Dalian Yifang FC,Belgium,CSL,83,Gold,LM,88,79,75,86,41,64
+f19_1084,Emiliano Viviano,SPAL,Italy,Serie A TIM,83,Gold,GK,83,84,79,85,30,81
+f19_1088,Daniele Rugani,Juventus,Italy,Serie A TIM,82,Gold,CB,62,39,53,64,85,75
+f19_1089,Federico Bernardeschi,Juventus,Italy,Serie A TIM,82,Gold,RM,83,75,80,85,56,64
+f19_1091,Mario Götze,Borussia Dortmund,Germany,Bundesliga,82,Gold,CM,69,73,83,86,59,67
+f19_1092,Axel Witsel,Borussia Dortmund,Belgium,Bundesliga,82,Gold,CM,71,74,77,79,75,82
+f19_1094,Ömer Toprak,Borussia Dortmund,Turkey,Bundesliga,82,Gold,CB,78,37,63,67,83,74
+f19_1098,Antonio Valencia,Manchester United,Ecuador,Premier League,82,Gold,RB,85,67,76,80,79,79
+f19_1099,Jesse Lingard,Manchester United,England,Premier League,82,Gold,CAM,81,78,76,84,56,68
+f19_1100,Fred,Manchester United,Brazil,Premier League,82,Gold,CM,79,74,77,82,75,71
+f19_1101,Eric Bailly,Manchester United,Côte d'Ivoire,Premier League,82,Gold,CB,74,42,59,66,82,82
+f19_1102,Ander Herrera,Manchester United,Spain,Premier League,82,Gold,CM,71,72,79,80,78,76
+f19_1103,John Stones,Manchester City,England,Premier League,82,Gold,CB,69,36,69,71,83,78
+f19_1105,Clément Lenglet,FC Barcelona,France,LaLiga Santander,82,Gold,CB,73,35,59,67,83,78
+f19_1107,Rafinha,FC Barcelona,Brazil,LaLiga Santander,82,Gold,CAM,70,76,79,84,69,62
+f19_1108,Ousmane Dembélé,FC Barcelona,France,LaLiga Santander,82,Gold,RW,89,75,76,87,36,55
+f19_1109,Marcos Alonso,Chelsea,Spain,Premier League,82,Gold,LB,73,73,78,77,80,79
+f19_1110,Pedro,Chelsea,Spain,Premier League,82,Gold,RW,76,77,77,83,43,56
+f19_1111,Andreas Christensen,Chelsea,Denmark,Premier League,82,Gold,CB,69,31,63,70,84,72
+f19_1112,Olivier Giroud,Chelsea,France,Premier League,82,Gold,ST,47,82,71,74,42,79
+f19_1113,Serge Gnabry,FC Bayern München,Germany,Bundesliga,82,Gold,LM,91,81,72,85,44,67
+f19_1115,Jordan Henderson,Liverpool,England,Premier League,82,Gold,CDM,66,70,83,75,77,78
+f19_1121,Georginio Wijnaldum,Liverpool,Holland,Premier League,82,Gold,CM,76,72,77,83,71,73
+f19_1124,Kieran Trippier,Tottenham Hotspur,England,Premier League,82,Gold,RB,75,58,82,76,79,72
+f19_1125,Lucas,Tottenham Hotspur,Brazil,Premier League,82,Gold,RM,92,74,75,85,42,59
+f19_1126,Laurent Koscielny,Arsenal,France,Premier League,82,Gold,CB,65,41,62,65,82,75
+f19_1127,Petr Cech,Arsenal,Czech Republic,Premier League,82,Gold,GK,78,82,70,79,35,83
+f19_1128,Aaron Ramsey,Arsenal,Wales,Premier League,82,Gold,CM,67,76,79,80,67,74
+f19_1129,Shkodran Mustafi,Arsenal,Germany,Premier League,82,Gold,CB,62,57,64,62,81,77
+f19_1130,Gylfi Sigurðsson,Everton,Iceland,Premier League,82,Gold,CAM,59,80,84,79,56,70
+f19_1131,Idrissa Gueye,Everton,Senegal,Premier League,82,Gold,CDM,72,59,70,77,84,79
+f19_1132,Suso,Milan,Spain,Serie A TIM,82,Gold,RW,80,75,82,86,33,54
+f19_1133,Gianluigi Donnarumma,Milan,Italy,Serie A TIM,82,Gold,GK,88,78,72,88,46,78
+f19_1134,Alessio Romagnoli,Milan,Italy,Serie A TIM,82,Gold,CB,66,34,52,66,84,79
+f19_1135,Giacomo Bonaventura,Milan,Italy,Serie A TIM,82,Gold,CM,76,77,82,83,72,71
+f19_1136,Lucas Biglia,Milan,Argentina,Serie A TIM,82,Gold,CDM,65,63,81,81,77,71
+f19_1137,Sebastián Coates,Sporting CP,Uruguay,Liga NOS,82,Gold,CB,56,43,52,60,83,86
+f19_1138,Allan,Napoli,Brazil,Serie A TIM,82,Gold,CM,75,66,76,81,82,80
+f19_1143,Casillas,FC Porto,Spain,Liga NOS,82,Gold,GK,87,74,58,84,59,82
+f19_1146,Steven N'Zonzi,Roma,France,Serie A TIM,82,Gold,CDM,50,67,72,70,81,89
+f19_1147,Federico Fazio,Roma,Argentina,Serie A TIM,82,Gold,CB,40,41,54,56,85,83
+f19_1148,Alessandro Florenzi,Roma,Italy,Serie A TIM,82,Gold,RB,84,77,78,81,76,76
+f19_1149,Javier Pastore,Roma,Argentina,Serie A TIM,82,Gold,CM,69,75,83,84,56,63
+f19_1151,Marcano,Roma,Spain,Serie A TIM,82,Gold,CB,68,46,60,61,83,79
+f19_1153,Aleksandar Kolarov,Roma,Serbia,Serie A TIM,82,Gold,LB,71,70,81,76,81,81
+f19_1154,Thomas Meunier,Paris Saint-Germain,Belgium,Ligue 1 Conforama,82,Gold,RB,78,76,77,75,78,84
+f19_1156,Dani Alves,Paris Saint-Germain,Brazil,Ligue 1 Conforama,82,Gold,RB,78,71,81,84,77,66
+f19_1157,Gelson Martins,Atlético Madrid,Portugal,LaLiga Santander,82,Gold,RM,94,69,75,86,47,61
+f19_1158,Rodrigo,Atlético Madrid,Spain,LaLiga Santander,82,Gold,CM,68,69,75,77,76,75
+f19_1159,Thomas Teye Partey,Atlético Madrid,Ghana,LaLiga Santander,82,Gold,CDM,75,67,74,77,80,82
+f19_1160,Lucas Hernández,Atlético Madrid,France,LaLiga Santander,82,Gold,LB,82,47,68,71,80,78
+f19_1162,Luis Alberto,Lazio,Spain,Serie A TIM,82,Gold,CF,73,77,85,84,33,60
+f19_1163,Francesco Acerbi,Lazio,Italy,Serie A TIM,82,Gold,CB,59,50,58,58,85,80
+f19_1164,Marco Parolo,Lazio,Italy,Serie A TIM,82,Gold,CDM,69,76,76,76,79,80
+f19_1165,Leon Bailey,Bayer 04 Leverkusen,Jamaica,Bundesliga,82,Gold,LM,93,77,75,85,33,64
+f19_1166,Lars Bender,Bayer 04 Leverkusen,Germany,Bundesliga,82,Gold,RB,68,64,73,73,85,79
+f19_1167,Julian Brandt,Bayer 04 Leverkusen,Germany,Bundesliga,82,Gold,LM,81,77,78,84,30,64
+f19_1168,Franco Vázquez,Sevilla FC,Italy,LaLiga Santander,82,Gold,CAM,60,77,80,82,47,73
+f19_1169,Carlos Bacca,Villarreal CF,Colombia,LaLiga Santander,82,Gold,ST,74,79,65,79,33,71
+f19_1170,Víctor Ruíz,Villarreal CF,Spain,LaLiga Santander,82,Gold,CB,57,42,64,61,82,82
+f19_1171,Felipe Anderson,West Ham United,Brazil,Premier League,82,Gold,LM,92,75,78,88,56,60
+f19_1172,Marko Arnautovic,West Ham United,Austria,Premier League,82,Gold,ST,79,79,77,81,47,81
+f19_1173,Jardel,SL Benfica,Brazil,Liga NOS,82,Gold,CB,57,42,54,54,83,82
+f19_1175,Ljubomir Fejsa,SL Benfica,Serbia,Liga NOS,82,Gold,CDM,54,57,66,68,82,83
+f19_1177,Andrej Kramaric,TSG 1899 Hoffenheim,Croatia,Bundesliga,82,Gold,ST,75,84,71,85,30,71
+f19_1182,Harry Maguire,Leicester City,England,Premier League,82,Gold,CB,47,46,63,69,81,82
+f19_1183,Jamie Vardy,Leicester City,England,Premier League,82,Gold,ST,90,81,63,77,54,77
+f19_1184,Dani García,Athletic Club,Spain,LaLiga Santander,82,Gold,CDM,43,58,74,71,75,80
+f19_1185,Yann Sommer,Borussia Mönchengladbach,Switzerland,Bundesliga,82,Gold,GK,77,84,80,81,48,80
+f19_1186,Koen Casteels,VfL Wolfsburg,Belgium,Bundesliga,82,Gold,GK,83,77,77,83,44,81
+f19_1191,Marc Bartra,Real Betis,Spain,LaLiga Santander,82,Gold,CB,73,58,71,74,81,73
+f19_1192,Joaquín,Real Betis,Spain,LaLiga Santander,82,Gold,RM,73,77,83,82,41,61
+f19_1193,Pau López,Real Betis,Spain,LaLiga Santander,82,Gold,GK,81,82,79,81,45,83
+f19_1194,Andrés Guardado,Real Betis,Mexico,LaLiga Santander,82,Gold,CM,73,67,81,82,72,68
+f19_1195,Ezequiel Garay,Valencia CF,Argentina,LaLiga Santander,82,Gold,CB,35,63,66,65,82,79
+f19_1196,Geoffrey Kondogbia,Valencia CF,France,LaLiga Santander,82,Gold,CM,73,73,76,79,83,88
+f19_1198,Gabriel Paulista,Valencia CF,Brazil,LaLiga Santander,82,Gold,CB,73,49,68,66,83,80
+f19_1200,Ljubomir Fejsa,SL Benfica,Serbia,Liga NOS,82,Gold,CDM,54,57,66,68,82,83
+f19_1202,Andrej Kramaric,TSG 1899 Hoffenheim,Croatia,Bundesliga,82,Gold,ST,75,84,71,85,30,71
+f19_1207,Harry Maguire,Leicester City,England,Premier League,82,Gold,CB,47,46,63,69,81,82
+f19_1208,Jamie Vardy,Leicester City,England,Premier League,82,Gold,ST,90,81,63,77,54,77
+f19_1209,Dani García,Athletic Club,Spain,LaLiga Santander,82,Gold,CDM,43,58,74,71,75,80
+f19_1210,Yann Sommer,Borussia Mönchengladbach,Switzerland,Bundesliga,82,Gold,GK,77,84,80,81,48,80
+f19_1211,Koen Casteels,VfL Wolfsburg,Belgium,Bundesliga,82,Gold,GK,83,77,77,83,44,81
+f19_1216,Marc Bartra,Real Betis,Spain,LaLiga Santander,82,Gold,CB,73,58,71,74,81,73
+f19_1217,Joaquín,Real Betis,Spain,LaLiga Santander,82,Gold,RM,73,77,83,82,41,61
+f19_1218,Pau López,Real Betis,Spain,LaLiga Santander,82,Gold,GK,81,82,79,81,45,83
+f19_1219,Andrés Guardado,Real Betis,Mexico,LaLiga Santander,82,Gold,CM,73,67,81,82,72,68
+f19_1220,Ezequiel Garay,Valencia CF,Argentina,LaLiga Santander,82,Gold,CB,35,63,66,65,82,79
+f19_1221,Geoffrey Kondogbia,Valencia CF,France,LaLiga Santander,82,Gold,CM,73,73,76,79,83,88
+f19_1223,Gabriel Paulista,Valencia CF,Brazil,LaLiga Santander,82,Gold,CB,73,49,68,66,83,80
+f19_1225,Daniel Wass,Valencia CF,Denmark,LaLiga Santander,82,Gold,CM,75,76,82,79,72,73
+f19_1227,Gonçalo Guedes,Valencia CF,Portugal,LaLiga Santander,82,Gold,LW,88,79,76,82,36,68
+f19_1228,Kevin Kampl,RB Leipzig,Slovenia,Bundesliga,82,Gold,CM,79,66,79,85,63,62
+f19_1229,Emil Forsberg,RB Leipzig,Sweden,Bundesliga,82,Gold,CAM,73,71,81,83,33,65
+f19_1230,Adil Rami,Olympique de Marseille,France,Ligue 1 Conforama,82,Gold,CB,60,53,54,61,81,87
+f19_1231,Taison,Shakhtar Donetsk,Brazil,Ukrayina Liha,82,Gold,LM,92,79,75,85,47,65
+f19_1232,Marlos Romero Bonfim,Shakhtar Donetsk,Ukraine,Ukrayina Liha,82,Gold,RM,83,76,78,87,48,66
+f19_1233,Hakim Ziyech,Ajax,Morocco,Eredivisie,82,Gold,CAM,75,73,86,82,57,67
+f19_1234,Simone Zaza,Torino,Italy,Serie A TIM,82,Gold,ST,79,81,62,77,50,86
+f19_1235,Salvatore Sirigu,Torino,Italy,Serie A TIM,82,Gold,GK,84,76,76,81,50,83
+f19_1236,Andrea Belotti,Torino,Italy,Serie A TIM,82,Gold,ST,79,81,57,77,41,84
+f19_1237,Rune Almenning Jarstein,Hertha BSC,Norway,Bundesliga,82,Gold,GK,79,80,76,83,40,86
+f19_1238,Wilfried Zaha,Crystal Palace,Côte d'Ivoire,Premier League,82,Gold,CF,91,74,73,87,29,72
+f19_1242,Max Kruse,SV Werder Bremen,Germany,Bundesliga,82,Gold,CF,69,83,82,82,46,70
+f19_1243,Jirí Pavlenka,SV Werder Bremen,Czech Republic,Bundesliga,82,Gold,GK,85,78,68,85,35,78
+f19_1247,Vedran Corluka,Lokomotiv Moscow,Croatia,League of Russia,82,Gold,CB,58,51,67,67,81,83
+f19_1249,Edin Višca,Medipol Başakşehir FK,Bosnia and Herzegovina,Süper Lig,82,Gold,RM,89,79,75,83,47,63
+f19_1250,Andrea Consigli,Sassuolo,Italy,Serie A TIM,82,Gold,GK,82,83,72,83,48,82
+f19_1251,Sebastian Giovinco,Toronto FC,Italy,Major League Soccer,82,Gold,CF,84,80,79,87,27,57
+f19_1252,Jean Michaël Seri,Fulham,Côte d'Ivoire,Premier League,82,Gold,CM,76,71,82,81,73,73
+f19_1255,David Villa,New York City FC,Spain,Major League Soccer,82,Gold,ST,69,83,74,82,34,68
+f19_1256,Jonathan Viera,Beijing Guoan,Spain,CSL,82,Gold,CAM,81,75,81,84,61,69
+f19_1257,Cédric Bakambu,Beijing Guoan,Congo DR,CSL,82,Gold,ST,88,81,72,80,35,75
+f19_1258,Anderson Talisca,Guangzhou Evergrande Taobao,Brazil,CSL,82,Gold,CAM,76,82,80,80,59,71
+f19_1259,Oscar,Shanghai SIPG FC,Brazil,CSL,82,Gold,CAM,73,76,80,81,55,50
+f19_1260,Nicolás Gaitán,Dalian Yifang FC,Argentina,CSL,82,Gold,CAM,81,72,80,84,41,56
+f19_1261,Arthur,FC Barcelona,Brazil,LaLiga Santander,82,Gold,CM,69,73,79,82,70,69
+f19_1321,David Villa,Vissel Kobe,Spain,Meiji Yasuda J1 League,82,Gold,ST,69,83,74,82,34,68
