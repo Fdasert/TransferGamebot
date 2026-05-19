@@ -2270,77 +2270,87 @@ async def cb_dbg_achs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_superadmin(q.from_user.id):
         await q.answer()
         return
+    # Build everything BEFORE answering so errors can still be surfaced via show_alert
     try:
         uid = int(q.data.split("_")[2])
         target = db.get_user(uid)
         earned = db.get_user_achievements(uid)
-        await q.answer()
-        await q.edit_message_text(
+        kb = _dbg_achs_kb(uid)
+        text = (
             f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
             f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
             f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
-            f"⬜ = нет \\(нажми чтобы выдать\\)",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=_dbg_achs_kb(uid),
+            f"⬜ = нет \\(нажми чтобы выдать\\)"
         )
     except Exception as e:
         logger.exception("cb_dbg_achs error: %s", e)
-        await q.answer(f"Ошибка: {e}", show_alert=True)
+        await q.answer(f"Ошибка: {str(e)[:100]}", show_alert=True)
+        return
+    await q.answer()
+    try:
+        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+    except Exception as e:
+        logger.exception("cb_dbg_achs edit error: %s", e)
+        await ctx.bot.send_message(q.from_user.id, f"❌ Ошибка отображения: {e}")
 
 
 async def cb_dbg_give_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_gach_{uid}_{ach_id} — grant achievement + cosmetics."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     parts = q.data.split("_", 3)  # dbg_gach_{uid}_{ach_id}
     uid = int(parts[2])
     ach_id = parts[3]
     db.award_achievement(uid, ach_id)
-    # Also award cosmetics linked to this achievement
     for c_type, c_id in ACH_COSMETICS.get(ach_id, []):
         db.award_cosmetic(uid, c_type, c_id)
     ach = ACHIEVEMENTS.get(ach_id, {})
-    await q.answer(f"✅ Выдано: {ach.get('name', ach_id)}", show_alert=False)
+    # Build KB before answering so errors can be surfaced
     target = db.get_user(uid)
     earned = db.get_user_achievements(uid)
+    kb = _dbg_achs_kb(uid)
+    await q.answer(f"✅ Выдано: {ach.get('name', ach_id)}", show_alert=False)
     await q.edit_message_text(
         f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
         f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
         f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
         f"⬜ = нет \\(нажми чтобы выдать\\)",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=_dbg_achs_kb(uid),
+        reply_markup=kb,
     )
 
 
 async def cb_dbg_revoke_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_rach_{uid}_{ach_id} — revoke achievement. dbg_rach_all_{uid} — revoke all."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     parts = q.data.split("_", 3)  # dbg_rach_{uid}_{ach_id} OR dbg_rach_all_{uid}
     if parts[2] == "all":
         uid = int(parts[3])
         db.revoke_all_achievements(uid)
-        await q.answer("🗑 Все достижения удалены", show_alert=True)
+        alert = "🗑 Все достижения удалены"
     else:
         uid = int(parts[2])
         ach_id = parts[3]
         db.revoke_achievement(uid, ach_id)
         ach = ACHIEVEMENTS.get(ach_id, {})
-        await q.answer(f"🗑 Отозвано: {ach.get('name', ach_id)}", show_alert=False)
+        alert = f"🗑 Отозвано: {ach.get('name', ach_id)}"
+    # Build KB before answering
     target = db.get_user(uid)
     earned = db.get_user_achievements(uid)
+    kb = _dbg_achs_kb(uid)
+    await q.answer(alert, show_alert=False)
     await q.edit_message_text(
         f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
         f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
         f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
         f"⬜ = нет \\(нажми чтобы выдать\\)",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=_dbg_achs_kb(uid),
+        reply_markup=kb,
     )
 
 
@@ -2664,32 +2674,40 @@ async def cb_dbg_editt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cb_dbg_editp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """dbg_editp_{pid} — show phrase edit menu. dbg_editp_{field}_{pid} — action."""
+    """dbg_editp_{pid} — show phrase edit menu. dbg_editp_{field}_{pid} — action.
+    NOTE: phrase IDs contain underscores (e.g. p_sniper), so we split on action keywords.
+    """
     q = update.callback_query
     if not _is_superadmin(q.from_user.id):
         await q.answer()
         return
-    parts = q.data.split("_", 3)
-    if len(parts) == 4:
-        field = parts[2]  # body or reset
-        pid_p = parts[3]
-        if field == "reset":
-            db.reset_cosmetic_def(pid_p, "phrase")
-            _reload_cosm_overrides()
-            await q.answer("🔄 Сброшено до дефолта", show_alert=False)
-        else:
-            await set_state(q.from_user.id, "dbg_editp_body",
-                            {"cosmetic_id": pid_p, "cosmetic_type": "phrase"})
-            await q.answer()
-            await q.edit_message_text(
-                "✏️ Введи новый текст фразы:",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Отмена", callback_data="dbg_editcosm_phrases"),
-                ]]),
-            )
-            return
+    # Strip prefix "dbg_editp_" and check what follows
+    suffix = q.data[len("dbg_editp_"):]   # e.g. "body_p_sniper" / "reset_p_sniper" / "p_sniper"
+    if suffix.startswith("body_"):
+        field = "body"
+        pid_p = suffix[len("body_"):]      # e.g. "p_sniper"
+    elif suffix.startswith("reset_"):
+        field = "reset"
+        pid_p = suffix[len("reset_"):]
     else:
-        pid_p = parts[2]
+        field = None
+        pid_p = suffix                     # just the phrase ID, e.g. "p_sniper"
+
+    if field == "reset":
+        db.reset_cosmetic_def(pid_p, "phrase")
+        _reload_cosm_overrides()
+        await q.answer("🔄 Сброшено до дефолта", show_alert=False)
+    elif field == "body":
+        await set_state(q.from_user.id, "dbg_editp_body",
+                        {"cosmetic_id": pid_p, "cosmetic_type": "phrase"})
+        await q.answer()
+        await q.edit_message_text(
+            "✏️ Введи новый текст фразы:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отмена", callback_data="dbg_editcosm_phrases"),
+            ]]),
+        )
+        return
 
     cur = _get_phrase(pid_p)
     ov  = _cosm_overrides_cache.get(pid_p, {})
@@ -2716,41 +2734,48 @@ async def _handle_dbg_editcosm_input(
     cosm_id   = data.get("cosmetic_id", "")
     cosm_type = data.get("cosmetic_type", "")
 
-    if action == "dbg_editt_emoji":
-        db.upsert_cosmetic_def(cosm_id, cosm_type, emoji=text)
-        _reload_cosm_overrides()
-        await set_state(admin_id, "dbg_main", {})
-        cur = _get_title(cosm_id)
-        await update.message.reply_text(
-            f"✅ Эмодзи обновлено: {text} {cur.get('label','')}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_titles"),
-            ]]),
-        )
+    try:
+        if action == "dbg_editt_emoji":
+            db.upsert_cosmetic_def(cosm_id, cosm_type, emoji=text)
+            _reload_cosm_overrides()
+            await set_state(admin_id, "dbg_main", {})
+            cur = _get_title(cosm_id)
+            await update.message.reply_text(
+                f"✅ Эмодзи обновлено: {text} {cur.get('label','')}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_titles"),
+                ]]),
+            )
 
-    elif action == "dbg_editt_label":
-        db.upsert_cosmetic_def(cosm_id, cosm_type, label=text)
-        _reload_cosm_overrides()
-        await set_state(admin_id, "dbg_main", {})
-        cur = _get_title(cosm_id)
-        await update.message.reply_text(
-            f"✅ Название обновлено: {cur.get('emoji','')} {text}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_titles"),
-            ]]),
-        )
+        elif action == "dbg_editt_label":
+            db.upsert_cosmetic_def(cosm_id, cosm_type, label=text)
+            _reload_cosm_overrides()
+            await set_state(admin_id, "dbg_main", {})
+            cur = _get_title(cosm_id)
+            await update.message.reply_text(
+                f"✅ Название обновлено: {cur.get('emoji','')} {text}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_titles"),
+                ]]),
+            )
 
-    elif action == "dbg_editp_body":
-        db.upsert_cosmetic_def(cosm_id, cosm_type, body=text)
-        _reload_cosm_overrides()
-        await set_state(admin_id, "dbg_main", {})
-        await update.message.reply_text(
-            f"✅ Текст фразы обновлён:\n_{text}_",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_phrases"),
-            ]]),
-        )
+        elif action == "dbg_editp_body":
+            db.upsert_cosmetic_def(cosm_id, cosm_type, body=text)
+            _reload_cosm_overrides()
+            await set_state(admin_id, "dbg_main", {})
+            await update.message.reply_text(
+                f"✅ Текст фразы обновлён для [{cosm_id}]:\n{text}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_phrases"),
+                ]]),
+            )
+
+        else:
+            logger.warning("_handle_dbg_editcosm_input: unknown action %r", action)
+
+    except Exception as e:
+        logger.exception("_handle_dbg_editcosm_input error: %s", e)
+        await update.message.reply_text(f"❌ Ошибка сохранения: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -673,9 +673,8 @@ def get_user_achievements(user_id: int) -> list[str]:
     res = (
         get_client()
         .table("fut_achievements")
-        .select("achievement_id, earned_at")
+        .select("achievement_id")
         .eq("user_id", user_id)
-        .order("earned_at")
         .execute()
     )
     return [r["achievement_id"] for r in (res.data or [])]
@@ -807,12 +806,17 @@ def get_cosmetic_overrides() -> dict[str, dict]:
 def upsert_cosmetic_def(cosmetic_id: str, cosmetic_type: str, **fields) -> None:
     """Save or update a cosmetic definition override."""
     from datetime import datetime, timezone
-    get_client().table("cosmetic_definitions").upsert({
-        "cosmetic_id":   cosmetic_id,
-        "cosmetic_type": cosmetic_type,
-        "updated_at":    datetime.now(timezone.utc).isoformat(),
-        **fields,
-    }).execute()
+    res = get_client().table("cosmetic_definitions").upsert(
+        {
+            "cosmetic_id":   cosmetic_id,
+            "cosmetic_type": cosmetic_type,
+            "updated_at":    datetime.now(timezone.utc).isoformat(),
+            **fields,
+        },
+        on_conflict="cosmetic_id,cosmetic_type",
+    ).execute()
+    if not res.data:
+        raise RuntimeError(f"upsert_cosmetic_def returned no data for {cosmetic_id}/{cosmetic_type}")
 
 
 def reset_cosmetic_def(cosmetic_id: str, cosmetic_type: str) -> None:
