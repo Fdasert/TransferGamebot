@@ -2315,8 +2315,8 @@ async def cb_dbg_give_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     await q.edit_message_text(
         f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
         f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
-        f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
-        f"⬜ = нет \\(нажми чтобы выдать\\)",
+        f"✅ \\= уже есть \\(нажми чтобы отозвать\\)\n"
+        f"⬜ \\= нет \\(нажми чтобы выдать\\)",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=kb,
     )
@@ -2347,8 +2347,8 @@ async def cb_dbg_revoke_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     await q.edit_message_text(
         f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
         f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
-        f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
-        f"⬜ = нет \\(нажми чтобы выдать\\)",
+        f"✅ \\= уже есть \\(нажми чтобы отозвать\\)\n"
+        f"⬜ \\= нет \\(нажми чтобы выдать\\)",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=kb,
     )
