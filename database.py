@@ -715,6 +715,71 @@ def set_win_streak(user_id: int, streak: int) -> None:
     update_user(user_id, win_streak=streak)
 
 
+# ── Club allegiance ───────────────────────────────────────────────────────────
+
+def increment_club_guess(user_id: int, club_id: str) -> int:
+    """Increment correct-guess counter for a club. Returns new total."""
+    res = (
+        get_client().table("club_guess_counts")
+        .select("correct_count")
+        .eq("user_id", user_id)
+        .eq("club_id", club_id)
+        .execute()
+    )
+    if res.data:
+        new_count = res.data[0]["correct_count"] + 1
+        get_client().table("club_guess_counts").update(
+            {"correct_count": new_count}
+        ).eq("user_id", user_id).eq("club_id", club_id).execute()
+    else:
+        new_count = 1
+        get_client().table("club_guess_counts").insert(
+            {"user_id": user_id, "club_id": club_id, "correct_count": 1}
+        ).execute()
+    return new_count
+
+
+def get_club_guess_count(user_id: int, club_id: str) -> int:
+    """Return how many transfers from this club the user has guessed correctly."""
+    res = (
+        get_client().table("club_guess_counts")
+        .select("correct_count")
+        .eq("user_id", user_id)
+        .eq("club_id", club_id)
+        .execute()
+    )
+    return res.data[0]["correct_count"] if res.data else 0
+
+
+def get_club_guess_counts(user_id: int) -> dict[str, int]:
+    """Return {club_id: correct_count} for all clubs the user has guessed from."""
+    res = (
+        get_client().table("club_guess_counts")
+        .select("club_id, correct_count")
+        .eq("user_id", user_id)
+        .order("correct_count", desc=True)
+        .execute()
+    )
+    return {r["club_id"]: r["correct_count"] for r in (res.data or [])}
+
+
+def get_unlocked_clubs(user_id: int, threshold: int = 5) -> list[str]:
+    """Return club_ids where user has reached the unlock threshold."""
+    res = (
+        get_client().table("club_guess_counts")
+        .select("club_id")
+        .eq("user_id", user_id)
+        .gte("correct_count", threshold)
+        .execute()
+    )
+    return [r["club_id"] for r in (res.data or [])]
+
+
+def set_club_allegiance(user_id: int, club_id: str | None) -> None:
+    """Set or clear a user's club allegiance."""
+    update_user(user_id, club_allegiance=club_id)
+
+
 # ── Cosmetics ─────────────────────────────────────────────────────────────────
 
 def get_user_cosmetics(user_id: int, cosmetic_type: str | None = None) -> list[str]:

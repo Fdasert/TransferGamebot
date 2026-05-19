@@ -26,6 +26,7 @@ from telegram.error import TelegramError
 import database as db
 import casino as casino_module
 import fut as fut_module
+from club_emblems import CLUB_EMBLEMS, club_emblem_html, has_emblem
 from scoring import calculate_points, calculate_elo, calculate_placement_rating, format_fee, parse_fee_input
 from config import (
     BOT_TOKEN,
@@ -253,7 +254,7 @@ def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("← В меню", callback_data="menu_back")]])
 
 
-def leagues_kb() -> InlineKeyboardMarkup:
+def leagues_kb(game_id: int | None = None) -> InlineKeyboardMarkup:
     leagues = db.get_leagues()
     buttons = [
         InlineKeyboardButton(f"{lg['flag']} {lg['league_name']}", callback_data=f"gl_{lg['league_id']}")
@@ -261,10 +262,12 @@ def leagues_kb() -> InlineKeyboardMarkup:
     ]
     rows = [[b] for b in buttons]
     rows.append([InlineKeyboardButton("← Отмена", callback_data="game_cancel")])
+    if game_id:
+        rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
     return InlineKeyboardMarkup(rows)
 
 
-def clubs_kb(league_id: str, page: int = 0) -> InlineKeyboardMarkup:
+def clubs_kb(league_id: str, page: int = 0, game_id: int | None = None) -> InlineKeyboardMarkup:
     clubs = db.get_clubs_by_league(league_id)
     page_size = 10
     start = page * page_size
@@ -285,15 +288,19 @@ def clubs_kb(league_id: str, page: int = 0) -> InlineKeyboardMarkup:
         rows.append(nav)
 
     rows.append([InlineKeyboardButton("← Назад", callback_data="game_pick_league")])
+    if game_id:
+        rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
     return InlineKeyboardMarkup(rows)
 
 
-def transfers_kb(transfers: list[dict]) -> InlineKeyboardMarkup:
+def transfers_kb(transfers: list[dict], game_id: int | None = None) -> InlineKeyboardMarkup:
     rows = []
     for t in transfers:
         label = f"{t['player_name']}  ({t['season']})"
         rows.append([InlineKeyboardButton(label, callback_data=f"gt_{t['id']}")])
     rows.append([InlineKeyboardButton("← Назад к клубам", callback_data="game_pick_league")])
+    if game_id:
+        rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -396,6 +403,16 @@ def profile_text(user: dict) -> str:
     titles = db.get_user_cosmetics(user["user_id"], "title")
     phrases = db.get_user_cosmetics(user["user_id"], "phrase")
     cosmetics_line = f"\n🎨 Косметика: {len(titles)} титул\\(ов\\) · {len(phrases)} фраз\\(ы\\)" if (titles or phrases) else ""
+    # Club allegiance line
+    allegiance_id = str(user.get("club_allegiance") or "")
+    allegiance_line = ""
+    if allegiance_id:
+        try:
+            clubs_res = db.get_client().table("clubs").select("club_name").eq("club_id", allegiance_id).execute()
+            cname = clubs_res.data[0]["club_name"] if clubs_res.data else allegiance_id
+        except Exception:
+            cname = allegiance_id
+        allegiance_line = f"\n🏟 Клуб\\-фан: *{_esc(cname)}*"
     return (
         f"👤 *{_esc(_display_name(user))}*\n"
         f"🏅 Рейтинг: *{_esc(rating_display(user))}*\n"
@@ -403,6 +420,7 @@ def profile_text(user: dict) -> str:
         f"🎮 Игр: {gp} \\| ✅ Побед: {wins} \\| ❌ Поражений: {losses}\n"
         f"📊 Винрейт: {wr}"
         f"{cosmetics_line}"
+        f"{allegiance_line}"
     )
 
 
@@ -614,7 +632,7 @@ async def cb_achievements(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cb_cosmetics_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Main cosmetics menu: shows titles and phrases."""
+    """Main cosmetics menu: shows titles, phrases and club allegiance."""
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -622,6 +640,9 @@ async def cb_cosmetics_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     owned_titles = db.get_user_cosmetics(uid, "title")
     owned_phrases = db.get_user_cosmetics(uid, "phrase")
     active_title = db.get_active_title(uid)
+    unlocked_clubs = db.get_unlocked_clubs(uid)
+    user_data = db.get_user(uid)
+    allegiance_id = str(user_data.get("club_allegiance") or "") if user_data else ""
 
     lines = ["🎨 *КОСМЕТИКА*\n"]
 
@@ -641,9 +662,27 @@ async def cb_cosmetics_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
             lines.append(f"  _{_esc(p.get('text', ''))}_")
         lines.append("\n_💡 Фразы можно использовать в конце матча — кнопка «💬 Дразнить соперника»_")
 
+    # Club allegiance section
+    lines.append("\n*🏟 Клубная эмблема:*")
+    if unlocked_clubs:
+        if allegiance_id:
+            try:
+                clubs_res = db.get_client().table("clubs").select("club_name").eq("club_id", allegiance_id).execute()
+                cname = clubs_res.data[0]["club_name"] if clubs_res.data else allegiance_id
+            except Exception:
+                cname = allegiance_id
+            lines.append(f"  Активный клуб: *{_esc(cname)}* ✅")
+        else:
+            lines.append("  _Клуб не выбран_")
+        lines.append(f"  _Разблокировано клубов: {len(unlocked_clubs)}_")
+    else:
+        lines.append("  _Угадай 5 трансферов из одного клуба, чтобы разблокировать его эмблему\\._")
+
     rows = []
     if owned_titles:
         rows.append([InlineKeyboardButton("🏷 Выбрать титул", callback_data="cosmetics_titles")])
+    if unlocked_clubs:
+        rows.append([InlineKeyboardButton("🏟 Клубная эмблема", callback_data="club_allegiance")])
     rows.append([InlineKeyboardButton("← Профиль", callback_data="menu_profile")])
 
     await q.edit_message_text(
@@ -703,6 +742,94 @@ async def cb_set_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await cb_cosmetics_titles(update, ctx)
 
 
+async def cb_club_allegiance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show unlocked clubs list; player picks their fan-club allegiance."""
+    q = update.callback_query
+    uid = q.from_user.id
+
+    # q may already be answered if called from cb_set/clear_allegiance — ignore errors
+    try:
+        await q.answer()
+    except TelegramError:
+        pass
+
+    unlocked = db.get_unlocked_clubs(uid)
+    if not unlocked:
+        try:
+            await q.answer("У тебя ещё нет разблокированных клубов!", show_alert=True)
+        except TelegramError:
+            pass
+        return
+
+    user_data = db.get_user(uid)
+    current = str(user_data.get("club_allegiance") or "") if user_data else ""
+
+    # Fetch club names for all unlocked clubs in one call
+    try:
+        clubs_res = db.get_client().table("clubs").select("club_id, club_name").in_("club_id", unlocked).execute()
+        name_map = {str(r["club_id"]): r["club_name"] for r in (clubs_res.data or [])}
+    except Exception:
+        name_map = {}
+
+    # Build HTML message (needed for tg-emoji custom emblems)
+    lines = ["<b>🏟 Клубная эмблема</b>\n", "Выбери свой клуб-фан:\n"]
+    if current:
+        cname = name_map.get(current, current)
+        emblem = club_emblem_html(current)
+        lines.append(f"Сейчас: {emblem} <b>{cname}</b> ✅")
+
+    rows = []
+    for cid in unlocked:
+        cname = name_map.get(cid, cid)
+        label = f"✅ {cname}" if cid == current else cname
+        rows.append([InlineKeyboardButton(label, callback_data=f"allegiance_set_{cid}")])
+
+    if current:
+        rows.append([InlineKeyboardButton("❌ Убрать клуб", callback_data="allegiance_clear")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="cosmetics_menu")])
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_set_allegiance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """allegiance_set_<club_id> — set club allegiance."""
+    q = update.callback_query
+    uid = q.from_user.id
+    club_id = q.data[len("allegiance_set_"):]
+
+    # Verify ownership
+    unlocked = db.get_unlocked_clubs(uid)
+    if club_id not in unlocked:
+        await q.answer("Этот клуб ещё не разблокирован!", show_alert=True)
+        return
+
+    db.set_club_allegiance(uid, club_id)
+
+    try:
+        clubs_res = db.get_client().table("clubs").select("club_name").eq("club_id", club_id).execute()
+        cname = clubs_res.data[0]["club_name"] if clubs_res.data else club_id
+    except Exception:
+        cname = club_id
+
+    await q.answer(f"Клуб установлен: {cname}!", show_alert=False)
+
+    # Refresh the allegiance screen
+    await cb_club_allegiance(update, ctx)
+
+
+async def cb_clear_allegiance(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """allegiance_clear — remove club allegiance."""
+    q = update.callback_query
+    uid = q.from_user.id
+    db.set_club_allegiance(uid, None)
+    await q.answer("Клуб-фан убран", show_alert=False)
+    await cb_club_allegiance(update, ctx)
+
+
 async def cb_taunt_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """taunt_menu_<opponent_id> — show phrase selection to taunt opponent."""
     q = update.callback_query
@@ -721,7 +848,7 @@ async def cb_taunt_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         txt = p.get("text", "")
         short = txt[:35] + "…" if len(txt) > 35 else txt
         rows.append([InlineKeyboardButton(short, callback_data=f"taunt_send_{pid_p}_{opp_id}")])
-    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="taunt_cancel")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"taunt_cancel_{opp_id}")])
 
     await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
 
@@ -761,18 +888,20 @@ async def cb_taunt_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # Restore original result keyboard
     await q.edit_message_reply_markup(
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔄 Реванш", callback_data="result_rematch"),
+            InlineKeyboardButton("🔄 Реванш", callback_data=f"result_rematch_{opp_id}"),
             InlineKeyboardButton("🏠 Меню", callback_data="menu_back"),
         ]])
     )
 
 
 async def cb_taunt_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """taunt_cancel_{opp_id}"""
     q = update.callback_query
     await q.answer()
+    opp_id = int(q.data.split("_")[-1])
     await q.edit_message_reply_markup(
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔄 Реванш", callback_data="result_rematch"),
+            InlineKeyboardButton("🔄 Реванш", callback_data=f"result_rematch_{opp_id}"),
             InlineKeyboardButton("🏠 Меню", callback_data="menu_back"),
         ]])
     )
@@ -1072,6 +1201,12 @@ async def cb_challenge_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         await q.edit_message_text("Ошибка: игрок не найден.")
         return
 
+    # Remove accept/decline buttons so opponent can't decline after accept
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        pass
+
     await clear_state(challenger_id)
     await clear_state(q.from_user.id)
     await _start_game(ctx, challenger, challenged, q.message)
@@ -1079,11 +1214,21 @@ async def cb_challenge_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
 async def cb_challenge_decline(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer("Вызов отклонён", show_alert=True)
     parts = q.data.split("_")  # challenge_decline_{id}_{challenger_id}
     challenge_id = int(parts[2])
     challenger_id = int(parts[3])
 
+    # Guard: only decline if still pending
+    challenge = db.get_challenge(challenge_id)
+    if not challenge or challenge["status"] != "pending":
+        await q.answer("Этот вызов уже неактуален.", show_alert=True)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except TelegramError:
+            pass
+        return
+
+    await q.answer("Вызов отклонён", show_alert=True)
     db.update_challenge_status(challenge_id, "declined")
     await clear_state(q.from_user.id)
 
@@ -1169,7 +1314,7 @@ async def _start_game(
         f"⚔️ Игра против *{_esc(second_player['display_name'])}*\\!\n\n"
         f"Раунд *1/{TOTAL_ROUNDS}* — твой ход\\. Выбери лигу:",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=leagues_kb(),
+        reply_markup=leagues_kb(game_id=game_id),
     )
 
     # Notify guesser
@@ -1178,6 +1323,7 @@ async def _start_game(
         f"⚔️ Игра против *{_esc(first_player['display_name'])}*\\!\n\n"
         f"Раунд *1/{TOTAL_ROUNDS}* — соперник выбирает трансфер\\.\\.\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
     )
 
 
@@ -1201,7 +1347,7 @@ async def cb_pick_league(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     await q.edit_message_text(
         f"{lg.get('flag','')} *{_esc(lg.get('league_name',''))}* — выбери клуб:",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=clubs_kb(league_id),
+        reply_markup=clubs_kb(league_id, game_id=data.get("game_id")),
     )
 
 
@@ -1211,7 +1357,8 @@ async def cb_clubs_page(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # gcp_{league_id}_{page}
     parts = q.data[4:].rsplit("_", 1)
     league_id, page = parts[0], int(parts[1])
-    await q.edit_message_reply_markup(reply_markup=clubs_kb(league_id, page))
+    _, data = await get_state(q.from_user.id)
+    await q.edit_message_reply_markup(reply_markup=clubs_kb(league_id, page, game_id=data.get("game_id")))
 
 
 async def cb_pick_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1240,7 +1387,7 @@ async def cb_pick_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await q.edit_message_text(
         f"🔍 *{_esc(club_name)}* — выбери трансфер для соперника:",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=transfers_kb(transfers),
+        reply_markup=transfers_kb(transfers, game_id=data.get("game_id")),
     )
 
     # Notify the waiting guesser which club was chosen
@@ -1265,7 +1412,7 @@ async def cb_pick_league_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     if action not in ("picking_club", "picking_transfer"):
         return
     await set_state(user_id, "picking_league", data)
-    await q.edit_message_text("Выбери лигу:", reply_markup=leagues_kb())
+    await q.edit_message_text("Выбери лигу:", reply_markup=leagues_kb(game_id=data.get("game_id")))
 
 
 async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1315,7 +1462,11 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     picker_name = picker["display_name"] if picker else "Соперник"
 
     picker_phrases = db.get_user_cosmetics(user_id, "phrase")
-    picker_wait_kb = _taunt_game_kb(opponent_id) if picker_phrases else None
+    picker_kb_rows = []
+    if picker_phrases:
+        picker_kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{opponent_id}")])
+    picker_kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
+    picker_wait_kb = InlineKeyboardMarkup(picker_kb_rows)
     await q.edit_message_text(
         f"✅ Трансфер выбран\\!\n\n"
         f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
@@ -1329,7 +1480,7 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     p1_score = game["player1_score"]
     p2_score = game["player2_score"]
 
-    await _send_guess_prompt(ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name, picker_id=user_id)
+    await _send_guess_prompt(ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name, picker_id=user_id, game_id=game_id)
 
 
 async def _send_guess_prompt(
@@ -1343,6 +1494,7 @@ async def _send_guess_prompt(
     p2_score: int,
     picker_name: str,
     picker_id: int | None = None,
+    game_id: int | None = None,
 ) -> None:
     hint_lines = _build_hint_lines(transfer, used_hint_types)
     can_hint = hints_used < MAX_HINTS
@@ -1371,6 +1523,10 @@ async def _send_guess_prompt(
         guesser_phrases = db.get_user_cosmetics(guesser_id, "phrase")
         if guesser_phrases:
             kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{picker_id}")])
+
+    # Surrender button
+    if game_id:
+        kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
 
     kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
     await _send_photo_message(ctx, guesser_id, transfer.get("photo_url"), text, kb)
@@ -1434,7 +1590,7 @@ async def cb_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await q.answer(f"{label}: {val_str}", show_alert=True)
 
-    # Update keyboard — remove used hint, keep remaining + preserve taunt button
+    # Update keyboard — remove used hint, keep remaining + preserve taunt/surrender buttons
     remaining = [h for h in HINT_TYPES if h not in used]
     kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"gh_{h}")] for h in remaining]
     picker_id = data.get("picker_id")
@@ -1442,6 +1598,9 @@ async def cb_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         guesser_phrases = db.get_user_cosmetics(user_id, "phrase")
         if guesser_phrases:
             kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{picker_id}")])
+    game_id_h = data.get("game_id")
+    if game_id_h:
+        kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id_h}")])
     try:
         await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
     except TelegramError:
@@ -1517,6 +1676,39 @@ async def _handle_guess(
 
     tier, points = calculate_points(guess, actual_fee, hints_used)
 
+    # ── Club allegiance: track correct guesses & apply fan bonus ─────────────
+    fan_bonus_coins = 0
+    fan_bonus_club_name: str | None = None
+    if tier != "miss":
+        transfer_row = db.get_transfer(transfer_id)
+        t_club_id = str(transfer_row.get("club_id", "")) if transfer_row else ""
+        if t_club_id:
+            new_count = db.increment_club_guess(user_id, t_club_id)
+
+            # Notify on unlock milestone
+            if new_count == 5:
+                clubs = db.get_client().table("clubs").select("club_name").eq("club_id", t_club_id).execute()
+                cname = clubs.data[0]["club_name"] if clubs.data else t_club_id
+                emblem = club_emblem_html(t_club_id) if has_emblem(t_club_id) else "🏟"
+                try:
+                    await ctx.bot.send_message(
+                        user_id,
+                        f"🔓 <b>Клуб разблокирован!</b>\n\n"
+                        f"{emblem} <b>{cname}</b>\n\n"
+                        f"Ты угадал 5 трансферов этого клуба — теперь можешь стать его фанатом!\n"
+                        f"<i>Профиль → Косметика → Клубная эмблема</i>",
+                        parse_mode="HTML",
+                    )
+                except TelegramError:
+                    pass
+
+            # Fan bonus: +15 монет если это клуб-аллегiance игрока
+            guesser_user = db.get_user(user_id)
+            if guesser_user and str(guesser_user.get("club_allegiance") or "") == t_club_id:
+                fan_bonus_coins = 15
+                clubs = db.get_client().table("clubs").select("club_name").eq("club_id", t_club_id).execute()
+                fan_bonus_club_name = clubs.data[0]["club_name"] if clubs.data else t_club_id
+
     # Update round in DB
     round_row = db.get_round(game_id, round_num)
     if round_row:
@@ -1548,9 +1740,12 @@ async def _handle_guess(
 
     effect = tier_effect(tier, points)
 
+    # Credit fan bonus coins now so result card reflects it
+    if fan_bonus_coins > 0:
+        db.add_coins(user_id, fan_bonus_coins)
+
     # Result card shown to both players
     def _result_card(is_guesser: bool) -> str:
-        role = "Твой результат" if is_guesser else "Результат соперника"
         card = (
             f"{effect}\n\n"
             f"👤 *{_esc(player_name)}*\n"
@@ -1559,6 +1754,8 @@ async def _handle_guess(
         )
         if hints_used:
             card += f"\n💡 Подсказок использовано: {hints_used} \\(\\-{hints_used} к очкам\\)"
+        if is_guesser and fan_bonus_coins > 0 and fan_bonus_club_name:
+            card += f"\n⭐ Бонус фаната *{_esc(fan_bonus_club_name)}*\\: \\+{fan_bonus_coins} монет"
         return card
 
     # Send to guesser
@@ -1612,7 +1809,7 @@ async def _handle_guess(
             f"📊 Счёт: *{my_score}* — *{opp_score}*\n\n"
             f"Раунд *{next_round}/{TOTAL_ROUNDS}* — твой ход\\. Выбери лигу:",
             parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=leagues_kb(),
+            reply_markup=leagues_kb(game_id=game_id),
         )
 
         opp_score2 = p1_score if new_guesser_id == p1_id else p2_score
@@ -1622,6 +1819,7 @@ async def _handle_guess(
             f"📊 Счёт: *{my_score2}* — *{opp_score2}*\n\n"
             f"Раунд *{next_round}/{TOTAL_ROUNDS}* — соперник выбирает трансфер\\.\\.\\.",
             parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
         )
 
 
@@ -1933,7 +2131,7 @@ async def _finish_game(
                            rating_mode: str) -> None:
         me = p1 if pid == p1_id else p2
         diff = new_r - old_r
-        diff_str = f"\\+{diff}" if diff >= 0 else str(diff)
+        diff_str = f"\\+{diff}" if diff >= 0 else f"\\-{abs(diff)}"
         opp_name = _esc(opponent["display_name"])
         my_name = _esc(me["display_name"])
 
@@ -1990,7 +2188,7 @@ async def _finish_game(
         else:
             # Rated ELO
             arrow = "📈" if delta >= 0 else "📉"
-            delta_str = f"\\+{delta}" if delta >= 0 else str(delta)
+            delta_str = f"\\+{delta}" if delta >= 0 else f"\\-{abs(delta)}"
 
             exact_cnt = sum(1 for r in my_rounds_r if r.get("accuracy_tier") == "exact" and r.get("completed"))
             close_cnt = sum(1 for r in my_rounds_r if r.get("accuracy_tier") == "5pct"  and r.get("completed"))
@@ -2027,12 +2225,12 @@ async def _finish_game(
         )
 
         # Build result keyboard with optional taunt button
+        opp_id = p2_id if pid == p1_id else p1_id
         res_rows = [
-            [InlineKeyboardButton("🔄 Реванш", callback_data="result_rematch"),
+            [InlineKeyboardButton("🔄 Реванш", callback_data=f"result_rematch_{opp_id}"),
              InlineKeyboardButton("🏠 Меню", callback_data="menu_back")],
         ]
         my_phrases = db.get_user_cosmetics(pid, "phrase")
-        opp_id = p2_id if pid == p1_id else p1_id
         if my_phrases:
             res_rows.append([InlineKeyboardButton(
                 "💬 Дразнить соперника",
@@ -2079,13 +2277,61 @@ async def _finish_game(
 # ── Rematch ───────────────────────────────────────────────────────────────────
 
 async def cb_result_rematch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """result_rematch_{opp_id} — send a rematch challenge to the last opponent."""
     q = update.callback_query
     await q.answer()
+    user_id = q.from_user.id
+    opp_id = int(q.data.split("_", 2)[2])  # result_rematch_{opp_id}
+
+    user = db.get_user(user_id)
+    target = db.get_user(opp_id)
+    if not user or not target:
+        await q.edit_message_text("Игрок не найден.", reply_markup=main_menu_kb())
+        return
+
+    # Don't allow double-challenging if already waiting
+    cur_action, _ = await get_state(user_id)
+    if cur_action == "waiting_for_opponent":
+        await q.answer("Ты уже ждёшь ответа на вызов.", show_alert=True)
+        return
+
+    challenge = db.create_challenge(user_id, opp_id)
+    challenge_id = challenge["id"]
+
+    await set_state(user_id, "waiting_for_opponent", {
+        "challenge_id": challenge_id,
+        "challenged_id": opp_id,
+    })
+    await set_state(opp_id, "challenge_received", {
+        "challenge_id": challenge_id,
+        "challenger_id": user_id,
+    })
+
     await q.edit_message_text(
-        "Хочешь реванш? Вызови соперника через меню\\.",
+        f"🔄 Запрос на реванш отправлен *{_esc(target['display_name'])}*\\.\n\nЖдём ответа\\.\\.\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=play_menu_kb(),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отменить", callback_data="menu_back")]]),
     )
+
+    try:
+        await ctx.bot.send_message(
+            opp_id,
+            f"🔄 *{_esc(_display_name(user))}* хочет реванш\\!\n\n"
+            f"🏅 Рейтинг: {_esc(rating_display(user))}",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Принять", callback_data=f"challenge_accept_{challenge_id}_{user_id}"),
+                InlineKeyboardButton("❌ Отклонить", callback_data=f"challenge_decline_{challenge_id}_{user_id}"),
+            ]]),
+        )
+    except TelegramError as e:
+        logger.warning("Could not DM rematch target %s: %s", opp_id, e)
+        await q.edit_message_text(
+            "⚠️ Не удалось отправить запрос сопернику\\. Возможно, они не запустили бота\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu_kb(),
+        )
+        await clear_state(user_id)
 
 
 # ── Game cancel ───────────────────────────────────────────────────────────────
@@ -2095,6 +2341,66 @@ async def cb_game_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     await q.answer()
     await clear_state(q.from_user.id)
     await q.edit_message_text("Действие отменено.", reply_markup=main_menu_kb())
+
+
+async def cb_game_surrender(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """game_surrender_{game_id} — player forfeits the current game."""
+    q = update.callback_query
+    user_id = q.from_user.id
+
+    action, data = await get_state(user_id)
+    valid_states = (
+        "guessing", "waiting_for_guess", "waiting_for_pick",
+        "picking_league", "picking_club", "picking_transfer",
+    )
+    if action not in valid_states:
+        await q.answer("У тебя нет активной игры.", show_alert=True)
+        return
+
+    game_id = data.get("game_id")
+    if not game_id:
+        await q.answer("Не могу найти игру.", show_alert=True)
+        return
+
+    game = db.get_game(game_id)
+    if not game:
+        await q.answer("Игра не найдена.", show_alert=True)
+        return
+
+    p1_id = game["player1_id"]
+    p2_id = game["player2_id"]
+    opponent_id = p2_id if user_id == p1_id else p1_id
+
+    p1_score = game["player1_score"]
+    p2_score = game["player2_score"]
+
+    # Force surrenderer to lose: ensure opponent's score is higher
+    if user_id == p1_id:
+        if p1_score >= p2_score:
+            p2_score = p1_score + 1
+    else:
+        if p2_score >= p1_score:
+            p1_score = p2_score + 1
+
+    await q.answer("🏳 Ты сдался", show_alert=True)
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except TelegramError:
+        pass
+
+    surrenderer = db.get_user(user_id)
+    sname = _esc(surrenderer["display_name"]) if surrenderer else "Соперник"
+
+    try:
+        await ctx.bot.send_message(
+            opponent_id,
+            f"🏳 *{sname}* сдался\\! Ты побеждаешь\\!",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    except TelegramError:
+        pass
+
+    await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3464,9 +3770,12 @@ def create_application() -> Application:
         ("^cosmetics_menu$",      cb_cosmetics_menu),
         ("^cosmetics_titles$",    cb_cosmetics_titles),
         ("^set_title_",           cb_set_title),
+        ("^club_allegiance$",     cb_club_allegiance),
+        ("^allegiance_set_",      cb_set_allegiance),
+        ("^allegiance_clear$",    cb_clear_allegiance),
         ("^taunt_menu_",          cb_taunt_menu),
         ("^taunt_send_",          cb_taunt_send),
-        ("^taunt_cancel$",        cb_taunt_cancel),
+        ("^taunt_cancel_",         cb_taunt_cancel),
         ("^taunt_gsend_",         cb_taunt_game_send),
         ("^taunt_game_",          cb_taunt_game_menu),
         ("^taunt_gcancel_",       cb_taunt_game_cancel),
@@ -3483,10 +3792,11 @@ def create_application() -> Application:
         ("^challenge_accept_",    cb_challenge_accept),
         ("^challenge_decline_",   cb_challenge_decline),
         # Results
-        ("^result_rematch$",      cb_result_rematch),
+        ("^result_rematch_",      cb_result_rematch),
         ("^result_menu$",         cb_menu_back),
         # Game
         ("^game_cancel$",         cb_game_cancel),
+        ("^game_surrender_",      cb_game_surrender),
         ("^game_pick_league$",    cb_pick_league_back),
         ("^gl_",                  cb_pick_league),
         ("^gcp_",                 cb_clubs_page),
