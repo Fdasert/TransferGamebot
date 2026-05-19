@@ -386,13 +386,48 @@ def _esc(text: str) -> str:
     return text
 
 
+_cosm_overrides_cache: dict[str, dict] = {}
+
+
+def _reload_cosm_overrides() -> None:
+    """Reload cosmetic definition overrides from Supabase into cache."""
+    global _cosm_overrides_cache
+    try:
+        _cosm_overrides_cache = db.get_cosmetic_overrides()
+    except Exception:
+        pass
+
+
+def _get_title(tid: str) -> dict:
+    """Return title definition merged: hardcoded defaults + DB overrides."""
+    base = dict(TITLES.get(tid, {}))
+    ov = _cosm_overrides_cache.get(tid, {})
+    if ov.get("emoji"):
+        base["emoji"] = ov["emoji"]
+    if ov.get("label"):
+        base["label"] = ov["label"]
+    return base
+
+
+def _get_phrase(pid: str) -> dict:
+    """Return phrase definition merged: hardcoded defaults + DB overrides."""
+    base = dict(PHRASES.get(pid, {}))
+    ov = _cosm_overrides_cache.get(pid, {})
+    if ov.get("body"):
+        base["text"] = ov["body"]
+    if ov.get("emoji"):
+        base["emoji"] = ov["emoji"]
+    return base
+
+
 def _display_name(user: dict) -> str:
     """Return display name with active title prefix if set."""
     name = user.get("display_name", "?")
     title_id = user.get("active_title")
-    if title_id and title_id in TITLES:
-        t = TITLES[title_id]
-        return f"{t['emoji']} {t['label']} • {name}"
+    if title_id:
+        t = _get_title(title_id)
+        if t:
+            return f"{t['emoji']} {t['label']} • {name}"
     return name
 
 
@@ -1956,8 +1991,9 @@ def _is_superadmin(user_id: int) -> bool:
 
 def debug_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 Выбрать игрока", callback_data="dbg_lookup")],
-        [InlineKeyboardButton("← Меню", callback_data="menu_back")],
+        [InlineKeyboardButton("👥 Выбрать игрока",      callback_data="dbg_lookup")],
+        [InlineKeyboardButton("✏️ Редактор косметики",  callback_data="dbg_editcosm")],
+        [InlineKeyboardButton("← Меню",                 callback_data="menu_back")],
     ])
 
 
@@ -2126,8 +2162,8 @@ async def cb_dbg_resetcal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cb_dbg_clearstate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     uid = int(q.data.split("_")[2])
     db.clear_pending_action(uid)
@@ -2178,6 +2214,9 @@ async def _handle_dbg_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE, acti
             reply_markup=debug_user_kb(uid),
         )
 
+    elif action.startswith("dbg_editt_") or action.startswith("dbg_editp_"):
+        await _handle_dbg_editcosm_input(update, action, data)
+
 
 # ── Debug: Achievements management ───────────────────────────────────────────
 
@@ -2199,20 +2238,25 @@ def _dbg_achs_kb(uid: int) -> InlineKeyboardMarkup:
 async def cb_dbg_achs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_achs_{uid} — achievement management panel."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
-    uid = int(q.data.split("_")[2])
-    target = db.get_user(uid)
-    earned = db.get_user_achievements(uid)
-    await q.edit_message_text(
-        f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
-        f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
-        f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
-        f"⬜ = нет \\(нажми чтобы выдать\\)",
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=_dbg_achs_kb(uid),
-    )
+    try:
+        uid = int(q.data.split("_")[2])
+        target = db.get_user(uid)
+        earned = db.get_user_achievements(uid)
+        await q.answer()
+        await q.edit_message_text(
+            f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
+            f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
+            f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
+            f"⬜ = нет \\(нажми чтобы выдать\\)",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=_dbg_achs_kb(uid),
+        )
+    except Exception as e:
+        logger.exception("cb_dbg_achs error: %s", e)
+        await q.answer(f"Ошибка: {e}", show_alert=True)
 
 
 async def cb_dbg_give_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2449,6 +2493,235 @@ async def cb_dbg_cptoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         db.award_cosmetic(uid, "phrase", phrase_id)
         await q.answer("✅ Фраза выдана", show_alert=False)
     await q.edit_message_reply_markup(reply_markup=_dbg_cphrases_kb(uid))
+
+
+# ── Debug: Edit cosmetic definitions ─────────────────────────────────────────
+
+def _dbg_editcosm_kb() -> InlineKeyboardMarkup:
+    """Main menu: choose title or phrase to edit."""
+    rows = []
+    rows.append([InlineKeyboardButton("🏷 Редактировать титулы", callback_data="dbg_editcosm_titles")])
+    rows.append([InlineKeyboardButton("💬 Редактировать фразы",  callback_data="dbg_editcosm_phrases")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="dbg_back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _dbg_editcosm_titles_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for tid, t in TITLES.items():
+        cur = _get_title(tid)
+        label = f"{cur.get('emoji','?')} {cur.get('label','?')}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"dbg_editt_{tid}")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="dbg_editcosm")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _dbg_editcosm_phrases_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for pid_p, p in PHRASES.items():
+        cur = _get_phrase(pid_p)
+        short = cur.get("text", "")[:30] + "…"
+        rows.append([InlineKeyboardButton(short, callback_data=f"dbg_editp_{pid_p}")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="dbg_editcosm")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _dbg_editt_kb(tid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Эмодзи",   callback_data=f"dbg_editt_emoji_{tid}")],
+        [InlineKeyboardButton("✏️ Название",  callback_data=f"dbg_editt_label_{tid}")],
+        [InlineKeyboardButton("🔄 Сбросить",  callback_data=f"dbg_editt_reset_{tid}")],
+        [InlineKeyboardButton("← Назад",      callback_data="dbg_editcosm_titles")],
+    ])
+
+
+def _dbg_editp_kb(pid_p: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Текст фразы", callback_data=f"dbg_editp_body_{pid_p}")],
+        [InlineKeyboardButton("🔄 Сбросить",    callback_data=f"dbg_editp_reset_{pid_p}")],
+        [InlineKeyboardButton("← Назад",        callback_data="dbg_editcosm_phrases")],
+    ])
+
+
+async def cb_dbg_editcosm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_editcosm — main cosmetic definitions editor."""
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    await q.answer()
+    await q.edit_message_text(
+        "✏️ *Редактор косметики*\n_Изменения сохраняются в БД и действуют сразу\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_editcosm_kb(),
+    )
+
+
+async def cb_dbg_editcosm_titles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    _reload_cosm_overrides()
+    await q.answer()
+    await q.edit_message_text(
+        "🏷 *Выбери титул для редактирования:*",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_editcosm_titles_kb(),
+    )
+
+
+async def cb_dbg_editcosm_phrases(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    _reload_cosm_overrides()
+    await q.answer()
+    await q.edit_message_text(
+        "💬 *Выбери фразу для редактирования:*",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_editcosm_phrases_kb(),
+    )
+
+
+async def cb_dbg_editt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_editt_{tid} — show title edit menu."""
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    # data: dbg_editt_{tid}  OR  dbg_editt_{field}_{tid}
+    parts = q.data.split("_", 3)
+    # parts[0]=dbg, parts[1]=editt, parts[2]=tid OR field, parts[3]=tid (optional)
+    if len(parts) == 4:
+        field = parts[2]  # emoji or label or reset
+        tid   = parts[3]
+        if field == "reset":
+            db.reset_cosmetic_def(tid, "title")
+            _reload_cosm_overrides()
+            await q.answer("🔄 Сброшено до дефолта", show_alert=False)
+        else:
+            state_key = f"dbg_editt_{field}"
+            await set_state(q.from_user.id, state_key, {"cosmetic_id": tid, "cosmetic_type": "title"})
+            hint = "эмодзи (один символ, напр. 🔥)" if field == "emoji" else "новое название (напр. Мастер)"
+            await q.answer()
+            await q.edit_message_text(
+                f"✏️ Введи {hint}:",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Отмена", callback_data="dbg_editcosm_titles"),
+                ]]),
+            )
+            return
+    else:
+        tid = parts[2]
+
+    cur = _get_title(tid)
+    ov  = _cosm_overrides_cache.get(tid, {})
+    default = TITLES.get(tid, {})
+    lines = [
+        f"🏷 *{_esc(cur.get('emoji',''))} {_esc(cur.get('label',''))}*\n",
+        f"Эмодзи: `{_esc(cur.get('emoji','—'))}` {'\\(изменено\\)' if ov.get('emoji') else '\\(дефолт\\)'}",
+        f"Название: `{_esc(cur.get('label','—'))}` {'\\(изменено\\)' if ov.get('label') else '\\(дефолт\\)'}",
+        f"\nДефолт: {_esc(default.get('emoji',''))} {_esc(default.get('label',''))}",
+    ]
+    await q.answer()
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_editt_kb(tid),
+    )
+
+
+async def cb_dbg_editp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_editp_{pid} — show phrase edit menu. dbg_editp_{field}_{pid} — action."""
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    parts = q.data.split("_", 3)
+    if len(parts) == 4:
+        field = parts[2]  # body or reset
+        pid_p = parts[3]
+        if field == "reset":
+            db.reset_cosmetic_def(pid_p, "phrase")
+            _reload_cosm_overrides()
+            await q.answer("🔄 Сброшено до дефолта", show_alert=False)
+        else:
+            await set_state(q.from_user.id, "dbg_editp_body",
+                            {"cosmetic_id": pid_p, "cosmetic_type": "phrase"})
+            await q.answer()
+            await q.edit_message_text(
+                "✏️ Введи новый текст фразы:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Отмена", callback_data="dbg_editcosm_phrases"),
+                ]]),
+            )
+            return
+    else:
+        pid_p = parts[2]
+
+    cur = _get_phrase(pid_p)
+    ov  = _cosm_overrides_cache.get(pid_p, {})
+    default = PHRASES.get(pid_p, {})
+    lines = [
+        f"💬 *Фраза:* _{_esc(cur.get('text',''))}_\n",
+        f"{'\\(изменено\\)' if ov.get('body') else '\\(дефолт\\)'}",
+        f"\nДефолт: _{_esc(default.get('text',''))}_",
+    ]
+    await q.answer()
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_editp_kb(pid_p),
+    )
+
+
+async def _handle_dbg_editcosm_input(
+    update, action: str, data: dict
+) -> None:
+    """Handle text input for cosmetic definition edits."""
+    text = update.message.text.strip()
+    admin_id = update.effective_user.id
+    cosm_id   = data.get("cosmetic_id", "")
+    cosm_type = data.get("cosmetic_type", "")
+
+    if action == "dbg_editt_emoji":
+        db.upsert_cosmetic_def(cosm_id, cosm_type, emoji=text)
+        _reload_cosm_overrides()
+        await set_state(admin_id, "dbg_main", {})
+        cur = _get_title(cosm_id)
+        await update.message.reply_text(
+            f"✅ Эмодзи обновлено: {text} {cur.get('label','')}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_titles"),
+            ]]),
+        )
+
+    elif action == "dbg_editt_label":
+        db.upsert_cosmetic_def(cosm_id, cosm_type, label=text)
+        _reload_cosm_overrides()
+        await set_state(admin_id, "dbg_main", {})
+        cur = _get_title(cosm_id)
+        await update.message.reply_text(
+            f"✅ Название обновлено: {cur.get('emoji','')} {text}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_titles"),
+            ]]),
+        )
+
+    elif action == "dbg_editp_body":
+        db.upsert_cosmetic_def(cosm_id, cosm_type, body=text)
+        _reload_cosm_overrides()
+        await set_state(admin_id, "dbg_main", {})
+        await update.message.reply_text(
+            f"✅ Текст фразы обновлён:\n_{text}_",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад к редактору", callback_data="dbg_editcosm_phrases"),
+            ]]),
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2916,6 +3189,12 @@ def create_application() -> Application:
         ("^dbg_ccleart_",         cb_dbg_ccleart),
         ("^dbg_cphrases_",        cb_dbg_cphrases),
         ("^dbg_cptoggle_",        cb_dbg_cptoggle),
+        # Cosmetic definitions editor
+        ("^dbg_editcosm_titles$", cb_dbg_editcosm_titles),
+        ("^dbg_editcosm_phrases$",cb_dbg_editcosm_phrases),
+        ("^dbg_editcosm$",        cb_dbg_editcosm),
+        ("^dbg_editt_",           cb_dbg_editt),
+        ("^dbg_editp_",           cb_dbg_editp),
         # Casino
         *casino_module.casino_handlers(),
         # FUT

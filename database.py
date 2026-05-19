@@ -793,6 +793,36 @@ def revoke_all_achievements(user_id: int) -> None:
     get_client().table("fut_achievements").delete().eq("user_id", user_id).execute()
 
 
+# ── Cosmetic definitions (editable via debug panel) ───────────────────────────
+
+def get_cosmetic_overrides() -> dict[str, dict]:
+    """
+    Returns DB overrides keyed by cosmetic_id.
+    Each value: {cosmetic_type, emoji, label, body}
+    """
+    res = get_client().table("cosmetic_definitions").select("*").execute()
+    return {r["cosmetic_id"]: r for r in (res.data or [])}
+
+
+def upsert_cosmetic_def(cosmetic_id: str, cosmetic_type: str, **fields) -> None:
+    """Save or update a cosmetic definition override."""
+    from datetime import datetime, timezone
+    get_client().table("cosmetic_definitions").upsert({
+        "cosmetic_id":   cosmetic_id,
+        "cosmetic_type": cosmetic_type,
+        "updated_at":    datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }).execute()
+
+
+def reset_cosmetic_def(cosmetic_id: str, cosmetic_type: str) -> None:
+    """Remove a cosmetic definition override (reverts to hardcoded default)."""
+    get_client().table("cosmetic_definitions").delete()\
+        .eq("cosmetic_id", cosmetic_id)\
+        .eq("cosmetic_type", cosmetic_type)\
+        .execute()
+
+
 # ── Cubeasses Supabase (кросс-бот обменник) ──────────────────────────────────
 
 import os as _os
