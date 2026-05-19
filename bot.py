@@ -2647,7 +2647,6 @@ async def cb_dbg_editt(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await q.answer()
             await q.edit_message_text(
                 f"✏️ Введи {hint}:",
-                parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("❌ Отмена", callback_data="dbg_editcosm_titles"),
                 ]]),
