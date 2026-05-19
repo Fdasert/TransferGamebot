@@ -156,6 +156,33 @@ ACHIEVEMENTS: dict[str, dict] = {
 }
 
 
+# ── Difficulty settings ───────────────────────────────────────────────────────
+
+DIFFICULTY: dict[str, dict] = {
+    "easy": {
+        "emoji": "🟢", "name": "Легко",
+        "desc": "Известные трансферы • 3 подсказки • слабый бот",
+        "min_fee": 40_000_000, "max_fee": None,
+        "max_hints": 3, "auto_hint": "nationality",
+        "coin_mult": 0.7,
+    },
+    "medium": {
+        "emoji": "🟡", "name": "Средне",
+        "desc": "Стандартная игра • 2 подсказки",
+        "min_fee": None, "max_fee": None,
+        "max_hints": 2, "auto_hint": None,
+        "coin_mult": 1.0,
+    },
+    "hard": {
+        "emoji": "🔴", "name": "Сложно",
+        "desc": "Малоизвестные трансферы • без подсказок • сильный бот",
+        "min_fee": None, "max_fee": 20_000_000,
+        "max_hints": 0, "auto_hint": None,
+        "coin_mult": 1.5,
+    },
+}
+
+
 # ── Cosmetic definitions ──────────────────────────────────────────────────────
 
 TITLES: dict[str, dict] = {
@@ -2739,33 +2766,72 @@ async def cb_play_training(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         await q.edit_message_text("Сначала зарегистрируйся через /start")
         return
 
+    rows = []
+    for diff_key, diff in DIFFICULTY.items():
+        rows.append([InlineKeyboardButton(
+            f"{diff['emoji']} {diff['name']} — {diff['desc']}",
+            callback_data=f"training_diff_{diff_key}",
+        )])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="menu_play")])
+
     await q.edit_message_text(
         "🤖 *Режим тренировки*\n\n"
         "6 раундов против бота\\. Рейтинг не меняется\\.\n\n"
-        "Раунды 1, 3, 5 — бот выбирает, ты угадываешь\\.\n"
-        "Раунды 2, 4, 6 — ты выбираешь, бот угадывает\\.",
+        "Выбери уровень сложности:",
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("▶️ Начать", callback_data="training_start")],
-            [InlineKeyboardButton("← Назад",   callback_data="menu_play")],
-        ]),
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
-async def cb_training_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def cb_training_difficulty(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """training_diff_{easy|medium|hard} — difficulty selected, start game."""
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
+    diff_key = q.data.split("_")[-1]   # easy / medium / hard
+    if diff_key not in DIFFICULTY:
+        diff_key = "medium"
+
+    diff = DIFFICULTY[diff_key]
+    state = {
+        "round_num": 1,
+        "player_score": 0,
+        "bot_score": 0,
+        "rounds_data": [],
+        "is_player_guessing": True,
+        "difficulty": diff_key,
+    }
+    await set_state(user_id, "training_game", state)
+    await q.edit_message_text(
+        f"{diff['emoji']} *{diff['name']}* — тренировка начинается\\!",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+    await _training_next_round(ctx, user_id, state)
+
+
+async def cb_training_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Restart with same difficulty (from 'Ещё раз' button)."""
+    q = update.callback_query
+    await q.answer()
+    user_id = q.from_user.id
+    # Try to keep last difficulty from context; default medium
+    action, prev_state = await get_state(user_id)
+    diff_key = prev_state.get("difficulty", "medium") if prev_state else "medium"
 
     state = {
         "round_num": 1,
         "player_score": 0,
         "bot_score": 0,
         "rounds_data": [],
-        "is_player_guessing": True,  # odd rounds: player guesses
+        "is_player_guessing": True,
+        "difficulty": diff_key,
     }
+    diff = DIFFICULTY.get(diff_key, DIFFICULTY["medium"])
     await set_state(user_id, "training_game", state)
-    await q.edit_message_text("🎮 Тренировка начинается\\!", parse_mode=ParseMode.MARKDOWN_V2)
+    await q.edit_message_text(
+        f"{diff['emoji']} *{diff['name']}* — тренировка начинается\\!",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
     await _training_next_round(ctx, user_id, state)
 
 
@@ -2776,12 +2842,19 @@ async def _training_next_round(
 ) -> None:
     round_num = state["round_num"]
     is_player_guessing = state["is_player_guessing"]
+    difficulty = state.get("difficulty", "medium")
+    diff = DIFFICULTY.get(difficulty, DIFFICULTY["medium"])
+    diff_badge = f"{diff['emoji']} {diff['name']} \\| "
 
     if is_player_guessing:
         # Bot picks a random transfer → player guesses
-        transfer = _bot_pick_transfer()
+        transfer = _bot_pick_transfer(difficulty)
         if not transfer:
-            await ctx.bot.send_message(user_id, "⚠️ Нет данных для тренировки\\. Дождись окончания загрузки трансферов\\.", parse_mode=ParseMode.MARKDOWN_V2)
+            await ctx.bot.send_message(
+                user_id,
+                "⚠️ Нет данных для тренировки\\. Дождись окончания загрузки трансферов\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
             await clear_state(user_id)
             return
 
@@ -2789,12 +2862,36 @@ async def _training_next_round(
         state["current_actual_fee"] = transfer["transfer_fee"]
         state["hints_used"] = 0
         state["used_hint_types"] = []
+
+        # Auto-hint for easy mode
+        auto_hint_text = ""
+        if diff.get("auto_hint"):
+            hint_type = diff["auto_hint"]
+            mapping = {
+                "nationality": ("🌍 Национальность", transfer.get("nationality")),
+                "position":    ("🎽 Позиция",         transfer.get("position")),
+                "age":         ("🎂 Возраст",         str(transfer.get("age", "?")) + " лет"),
+            }
+            label, val = mapping.get(hint_type, ("?", None))
+            if val:
+                state["used_hint_types"] = [hint_type]
+                state["hints_used"] = 0   # auto hint doesn't count against limit
+                auto_hint_text = f"\n💡 {label}: *{_esc(str(val))}*"
+
         await set_state(user_id, "training_guessing", state)
 
-        kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in HINT_TYPES]
+        max_hints = diff["max_hints"]
+        remaining = [h for h in HINT_TYPES if h not in state["used_hint_types"]]
+        if max_hints > 0:
+            kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in remaining]
+        else:
+            kb_rows = []
+        kb_rows.append([InlineKeyboardButton("❌ Завершить тренировку", callback_data="training_abort")])
+
         caption = (
-            f"🤖 Раунд *{round_num}/{TOTAL_ROUNDS}* — Бот выбрал трансфер:\n\n"
-            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n\n"
+            f"{diff_badge}Раунд *{round_num}/{TOTAL_ROUNDS}* — Бот выбрал трансфер:\n\n"
+            f"👤 Игрок: *{_esc(transfer['player_name'])}*"
+            f"{auto_hint_text}\n\n"
             f"💰 Назови сумму трансфера:\n_Например: 45M, 45000000, 500K_"
         )
         await _send_photo_message(ctx, user_id, transfer.get("photo_url"), caption, InlineKeyboardMarkup(kb_rows))
@@ -2804,14 +2901,43 @@ async def _training_next_round(
         await set_state(user_id, "training_picking_league", state_copy)
         await ctx.bot.send_message(
             user_id,
-            f"⚽ Раунд *{round_num}/{TOTAL_ROUNDS}* — Твой ход\\! Выбери лигу:",
+            f"{diff_badge}Раунд *{round_num}/{TOTAL_ROUNDS}* — Твой ход\\! Выбери лигу:",
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=training_leagues_kb(),
         )
 
 
-def _bot_pick_transfer() -> dict | None:
-    """Pick a random transfer from the DB for the bot to use."""
+def _bot_pick_transfer(difficulty: str = "medium") -> dict | None:
+    """Pick a random transfer filtered by difficulty fee range."""
+    import random as _random
+    diff = DIFFICULTY.get(difficulty, DIFFICULTY["medium"])
+    min_fee = diff.get("min_fee")
+    max_fee = diff.get("max_fee")
+
+    leagues = db.get_leagues()
+    _random.shuffle(leagues)
+    attempts = 0
+    for league in leagues * 3:   # up to 3 passes through league list
+        if attempts > 30:
+            break
+        attempts += 1
+        clubs = db.get_clubs_by_league(league["league_id"])
+        if not clubs:
+            continue
+        club = _random.choice(clubs)
+        transfers = db.get_transfers_by_club(club["club_id"], limit=50)
+        if min_fee:
+            transfers = [t for t in transfers if (t.get("transfer_fee") or 0) >= min_fee]
+        if max_fee:
+            transfers = [t for t in transfers if (t.get("transfer_fee") or 0) <= max_fee]
+        if transfers:
+            return _random.choice(transfers)
+    # Fallback: no filter
+    return _bot_pick_transfer_any()
+
+
+def _bot_pick_transfer_any() -> dict | None:
+    """Fallback: pick any random transfer regardless of fee."""
     import random as _random
     leagues = db.get_leagues()
     _random.shuffle(leagues)
@@ -2819,25 +2945,45 @@ def _bot_pick_transfer() -> dict | None:
         clubs = db.get_clubs_by_league(league["league_id"])
         if not clubs:
             continue
-        club = _random.choice(clubs)
-        transfers = db.get_transfers_by_club(club["club_id"], limit=20)
+        transfers = db.get_transfers_by_club(_random.choice(clubs)["club_id"], limit=20)
         if transfers:
             return _random.choice(transfers)
     return None
 
 
-def _bot_guess(actual_fee: int) -> int:
-    """Simulate bot guess — roughly within ±35% with occasional accuracy."""
+def _bot_guess(actual_fee: int, difficulty: str = "medium") -> int:
+    """Simulate bot guess accuracy based on difficulty."""
     import random as _random
     roll = _random.random()
-    if roll < 0.08:    # 8% exact
-        return actual_fee
-    elif roll < 0.20:  # 12% within 5%
-        error = _random.uniform(-0.05, 0.05)
-    elif roll < 0.45:  # 25% within 15%
-        error = _random.uniform(-0.15, 0.15)
-    else:              # 55% within 35%
-        error = _random.uniform(-0.35, 0.35)
+    if difficulty == "easy":
+        # Weak bot: makes bigger mistakes
+        if roll < 0.04:
+            return actual_fee
+        elif roll < 0.14:
+            error = _random.uniform(-0.10, 0.10)
+        elif roll < 0.35:
+            error = _random.uniform(-0.30, 0.30)
+        else:
+            error = _random.uniform(-0.60, 0.60)
+    elif difficulty == "hard":
+        # Strong bot: more accurate
+        if roll < 0.18:
+            return actual_fee
+        elif roll < 0.40:
+            error = _random.uniform(-0.05, 0.05)
+        elif roll < 0.70:
+            error = _random.uniform(-0.12, 0.12)
+        else:
+            error = _random.uniform(-0.22, 0.22)
+    else:  # medium — unchanged from original
+        if roll < 0.08:
+            return actual_fee
+        elif roll < 0.20:
+            error = _random.uniform(-0.05, 0.05)
+        elif roll < 0.45:
+            error = _random.uniform(-0.15, 0.15)
+        else:
+            error = _random.uniform(-0.35, 0.35)
     return max(100_000, round(actual_fee * (1 + error) / 100_000) * 100_000)
 
 
@@ -2927,7 +3073,7 @@ async def cb_training_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TY
         return
 
     actual_fee = transfer["transfer_fee"]
-    bot_guess = _bot_guess(actual_fee)
+    bot_guess = _bot_guess(actual_fee, state.get("difficulty", "medium"))
     tier, points = calculate_points(bot_guess, actual_fee, 0)
 
     state["bot_score"] += points
@@ -2965,7 +3111,14 @@ async def cb_training_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     used = data.get("used_hint_types", [])
     hints_used = data.get("hints_used", 0)
 
-    if hints_used >= MAX_HINTS:
+    diff_key = data.get("difficulty", "medium")
+    diff = DIFFICULTY.get(diff_key, DIFFICULTY["medium"])
+    max_hints = diff["max_hints"]
+
+    if max_hints == 0:
+        await q.answer("Подсказки недоступны на этом уровне сложности!", show_alert=True)
+        return
+    if hints_used >= max_hints:
         await q.answer("Лимит подсказок исчерпан!", show_alert=True)
         return
     if hint_type in used:
@@ -2989,9 +3142,15 @@ async def cb_training_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     await set_state(user_id, "training_guessing", data)
 
     remaining = [h for h in HINT_TYPES if h not in used]
-    kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in remaining]
+    # Only show hint buttons if there are still hints available
+    new_hints_used = data["hints_used"]
+    if new_hints_used < max_hints and remaining:
+        kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"tgh_{h}")] for h in remaining]
+    else:
+        kb_rows = []
+    kb_rows.append([InlineKeyboardButton("❌ Завершить тренировку", callback_data="training_abort")])
     try:
-        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
+        await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_rows))
     except TelegramError:
         pass
 
@@ -3070,6 +3229,12 @@ async def _training_finish(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, state: 
     bot_score = state["bot_score"]
     rounds_data = state["rounds_data"]
 
+    difficulty = state.get("difficulty", "medium")
+    diff = DIFFICULTY.get(difficulty, DIFFICULTY["medium"])
+    coin_mult = diff["coin_mult"]
+    coins_earned = max(1, int(player_score * coin_mult))
+    db.add_coins(user_id, coins_earned)
+
     TIER_ICON = {"exact": "🎯", "5pct": "🔥", "10pct": "👍", "20pct": "😅", "miss": "❌"}
 
     if player_score > bot_score:
@@ -3099,10 +3264,14 @@ async def _training_finish(ctx: ContextTypes.DEFAULT_TYPE, user_id: int, state: 
     lines.append(f"\n*Итого: {player_score} очков*")
     rounds_block = "\n".join(lines)
 
+    mult_str = f"×{coin_mult:.1f}".rstrip("0").rstrip(".")
+    coins_line = f"\n\n{diff['emoji']} *{_esc(diff['name'])}* — монеты: *\\+{coins_earned}* \\({_esc(mult_str)} к очкам\\)"
+
     text = (
         f"{header}\n\n"
         f"{score_block}\n\n"
-        f"*Твои угадывания:*\n{rounds_block}\n\n"
+        f"*Твои угадывания:*\n{rounds_block}"
+        f"{coins_line}\n\n"
         f"🔄 *Тренировка* — рейтинг не изменился"
     )
 
@@ -3164,6 +3333,7 @@ def create_application() -> Application:
         ("^gt_",                  cb_pick_transfer),
         ("^gh_",                  cb_hint),
         # Training
+        ("^training_diff_",       cb_training_difficulty),
         ("^training_start$",      cb_training_start),
         ("^training_abort$",      cb_training_abort),
         ("^training_pick_league$",cb_training_back_league),
