@@ -749,6 +749,50 @@ def set_active_title(user_id: int, title_id: str | None) -> None:
     update_user(user_id, active_title=title_id)
 
 
+def revoke_achievement(user_id: int, achievement_id: str) -> bool:
+    """Remove an achievement. Returns True if it existed."""
+    try:
+        res = (
+            get_client()
+            .table("fut_achievements")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("achievement_id", achievement_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def revoke_cosmetic(user_id: int, cosmetic_type: str, cosmetic_id: str) -> bool:
+    """Remove a cosmetic. Returns True if it existed."""
+    try:
+        res = (
+            get_client()
+            .table("fut_cosmetics")
+            .delete()
+            .eq("user_id", user_id)
+            .eq("cosmetic_type", cosmetic_type)
+            .eq("cosmetic_id", cosmetic_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def revoke_all_cosmetics(user_id: int) -> None:
+    """Remove all cosmetics and clear active title for a user."""
+    get_client().table("fut_cosmetics").delete().eq("user_id", user_id).execute()
+    update_user(user_id, active_title=None)
+
+
+def revoke_all_achievements(user_id: int) -> None:
+    """Remove all achievements for a user."""
+    get_client().table("fut_achievements").delete().eq("user_id", user_id).execute()
+
+
 # ── Cubeasses Supabase (кросс-бот обменник) ──────────────────────────────────
 
 import os as _os

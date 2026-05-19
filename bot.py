@@ -1990,11 +1990,13 @@ def _dbg_users_kb(page: int = 0) -> InlineKeyboardMarkup:
 
 def debug_user_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Изменить монеты",  callback_data=f"dbg_coins_{uid}"),
-         InlineKeyboardButton("🏅 Изменить рейтинг", callback_data=f"dbg_rating_{uid}")],
-        [InlineKeyboardButton("🔄 Сбросить калибровку", callback_data=f"dbg_resetcal_{uid}")],
-        [InlineKeyboardButton("🗑 Очистить состояние",  callback_data=f"dbg_clearstate_{uid}")],
-        [InlineKeyboardButton("← Назад", callback_data="dbg_back")],
+        [InlineKeyboardButton("💰 Монеты",        callback_data=f"dbg_coins_{uid}"),
+         InlineKeyboardButton("🏅 Рейтинг",       callback_data=f"dbg_rating_{uid}")],
+        [InlineKeyboardButton("🏆 Достижения",    callback_data=f"dbg_achs_{uid}"),
+         InlineKeyboardButton("🎨 Косметика",     callback_data=f"dbg_cosm_{uid}")],
+        [InlineKeyboardButton("🔄 Сбросить кал.", callback_data=f"dbg_resetcal_{uid}"),
+         InlineKeyboardButton("🗑 Состояние",     callback_data=f"dbg_clearstate_{uid}")],
+        [InlineKeyboardButton("← Назад",          callback_data="dbg_back")],
     ])
 
 
@@ -2057,6 +2059,12 @@ async def cb_dbg_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _user_dbg_text(user: dict) -> str:
+    uid = user["user_id"]
+    achs = db.get_user_achievements(uid)
+    titles = db.get_user_cosmetics(uid, "title")
+    phrases = db.get_user_cosmetics(uid, "phrase")
+    active = user.get("active_title") or "—"
+    active_label = f"{TITLES[active]['emoji']} {TITLES[active]['label']}" if active in TITLES else active
     return (
         f"👤 *{_esc(user['display_name'])}* \\(@{_esc(user.get('username') or '—')}\\)\n"
         f"🆔 ID: `{user['user_id']}`\n"
@@ -2064,7 +2072,10 @@ def _user_dbg_text(user: dict) -> str:
         f"🪙 Монеты: *{user.get('coins', 0)}*\n"
         f"🎮 Игр: {user.get('games_played',0)} \\| ✅ {user.get('wins',0)} \\| ❌ {user.get('losses',0)}\n"
         f"🔄 Калибровка: {user.get('calibration_games',0)}/10 "
-        f"\\({'✅' if user.get('is_calibrated') else '⏳'}\\)"
+        f"\\({'✅' if user.get('is_calibrated') else '⏳'}\\)\n"
+        f"🏆 Достижений: *{len(achs)}*\n"
+        f"🎨 Косметика: *{len(titles)}* тит\\. / *{len(phrases)}* фраз\n"
+        f"🏷 Активный титул: *{_esc(active_label)}*"
     )
 
 
@@ -2166,6 +2177,278 @@ async def _handle_dbg_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE, acti
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=debug_user_kb(uid),
         )
+
+
+# ── Debug: Achievements management ───────────────────────────────────────────
+
+def _dbg_achs_kb(uid: int) -> InlineKeyboardMarkup:
+    earned = set(db.get_user_achievements(uid))
+    rows = []
+    for ach_id, ach in ACHIEVEMENTS.items():
+        if ach_id in earned:
+            label = f"✅ {ach['emoji']} {ach['name']}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"dbg_rach_{uid}_{ach_id}")])
+        else:
+            label = f"⬜ {ach['emoji']} {ach['name']}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"dbg_gach_{uid}_{ach_id}")])
+    rows.append([InlineKeyboardButton("🗑 Сбросить все", callback_data=f"dbg_rach_all_{uid}")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data=f"dbg_su_{uid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_dbg_achs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_achs_{uid} — achievement management panel."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    target = db.get_user(uid)
+    earned = db.get_user_achievements(uid)
+    await q.edit_message_text(
+        f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
+        f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
+        f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
+        f"⬜ = нет \\(нажми чтобы выдать\\)",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_achs_kb(uid),
+    )
+
+
+async def cb_dbg_give_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_gach_{uid}_{ach_id} — grant achievement + cosmetics."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    parts = q.data.split("_", 3)  # dbg_gach_{uid}_{ach_id}
+    uid = int(parts[2])
+    ach_id = parts[3]
+    db.award_achievement(uid, ach_id)
+    # Also award cosmetics linked to this achievement
+    for c_type, c_id in ACH_COSMETICS.get(ach_id, []):
+        db.award_cosmetic(uid, c_type, c_id)
+    ach = ACHIEVEMENTS.get(ach_id, {})
+    await q.answer(f"✅ Выдано: {ach.get('name', ach_id)}", show_alert=False)
+    target = db.get_user(uid)
+    earned = db.get_user_achievements(uid)
+    await q.edit_message_text(
+        f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
+        f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
+        f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
+        f"⬜ = нет \\(нажми чтобы выдать\\)",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_achs_kb(uid),
+    )
+
+
+async def cb_dbg_revoke_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_rach_{uid}_{ach_id} — revoke achievement. dbg_rach_all_{uid} — revoke all."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    parts = q.data.split("_", 3)  # dbg_rach_{uid}_{ach_id} OR dbg_rach_all_{uid}
+    if parts[2] == "all":
+        uid = int(parts[3])
+        db.revoke_all_achievements(uid)
+        await q.answer("🗑 Все достижения удалены", show_alert=True)
+    else:
+        uid = int(parts[2])
+        ach_id = parts[3]
+        db.revoke_achievement(uid, ach_id)
+        ach = ACHIEVEMENTS.get(ach_id, {})
+        await q.answer(f"🗑 Отозвано: {ach.get('name', ach_id)}", show_alert=False)
+    target = db.get_user(uid)
+    earned = db.get_user_achievements(uid)
+    await q.edit_message_text(
+        f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
+        f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
+        f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
+        f"⬜ = нет \\(нажми чтобы выдать\\)",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_achs_kb(uid),
+    )
+
+
+# ── Debug: Cosmetics management ───────────────────────────────────────────────
+
+def _dbg_cosm_text(uid: int, user: dict) -> str:
+    owned_titles = db.get_user_cosmetics(uid, "title")
+    owned_phrases = db.get_user_cosmetics(uid, "phrase")
+    active = user.get("active_title") or "—"
+    active_label = f"{TITLES[active]['emoji']} {TITLES[active]['label']}" if active in TITLES else active
+
+    lines = [f"🎨 *Косметика — {_esc(user['display_name'])}*\n"]
+    lines.append(f"🏷 Активный титул: *{_esc(active_label)}*\n")
+
+    lines.append("*Титулы:*")
+    for tid, t in TITLES.items():
+        mark = "✅" if tid in owned_titles else "⬜"
+        lines.append(f"  {mark} {t['emoji']} {_esc(t['label'])}")
+
+    lines.append("\n*Фразы:*")
+    for pid_p, p in PHRASES.items():
+        mark = "✅" if pid_p in owned_phrases else "⬜"
+        lines.append(f"  {mark} _{_esc(p['text'][:40])}…_")
+
+    return "\n".join(lines)
+
+
+def _dbg_cosm_kb(uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏷 Управление титулами",  callback_data=f"dbg_ctitles_{uid}")],
+        [InlineKeyboardButton("💬 Управление фразами",   callback_data=f"dbg_cphrases_{uid}")],
+        [InlineKeyboardButton("🗑 Сбросить всю косметику", callback_data=f"dbg_cosm_reset_{uid}")],
+        [InlineKeyboardButton("← Назад",                 callback_data=f"dbg_su_{uid}")],
+    ])
+
+
+async def cb_dbg_cosm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_cosm_{uid} — cosmetics overview panel."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    target = db.get_user(uid)
+    await q.edit_message_text(
+        _dbg_cosm_text(uid, target),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_cosm_kb(uid),
+    )
+
+
+async def cb_dbg_cosm_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_cosm_reset_{uid} — wipe all cosmetics."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[3])
+    db.revoke_all_cosmetics(uid)
+    target = db.get_user(uid)
+    await q.answer("🗑 Вся косметика удалена", show_alert=True)
+    await q.edit_message_text(
+        _dbg_cosm_text(uid, target),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_cosm_kb(uid),
+    )
+
+
+def _dbg_ctitles_kb(uid: int) -> InlineKeyboardMarkup:
+    owned = set(db.get_user_cosmetics(uid, "title"))
+    active = db.get_active_title(uid)
+    rows = []
+    for tid, t in TITLES.items():
+        has = tid in owned
+        is_active = tid == active
+        mark = "✅🏷" if (has and is_active) else ("✅" if has else "⬜")
+        label = f"{mark} {t['emoji']} {t['label']}"
+        cb = f"dbg_ctoggle_{uid}_{tid}"
+        rows.append([InlineKeyboardButton(label, callback_data=cb)])
+    if active:
+        rows.append([InlineKeyboardButton("❌ Снять активный титул", callback_data=f"dbg_ccleart_{uid}")])
+    rows.append([InlineKeyboardButton("← Косметика", callback_data=f"dbg_cosm_{uid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_dbg_ctitles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_ctitles_{uid} — title management."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    await q.edit_message_text(
+        "🏷 *Управление титулами*\n"
+        "✅ = выдан \\| ✅🏷 = выдан и активен\n"
+        "_Нажми чтобы выдать/отозвать\\. Для активации — установи через меню косметики игрока_",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_ctitles_kb(uid),
+    )
+
+
+async def cb_dbg_ctoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_ctoggle_{uid}_{title_id} — toggle title ownership."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    parts = q.data.split("_", 3)  # dbg_ctoggle_{uid}_{title_id}
+    uid = int(parts[2])
+    title_id = parts[3]
+    owned = set(db.get_user_cosmetics(uid, "title"))
+    if title_id in owned:
+        db.revoke_cosmetic(uid, "title", title_id)
+        # If this was the active title, clear it
+        if db.get_active_title(uid) == title_id:
+            db.set_active_title(uid, None)
+        t = TITLES.get(title_id, {})
+        await q.answer(f"🗑 Титул отозван: {t.get('label','')}", show_alert=False)
+    else:
+        db.award_cosmetic(uid, "title", title_id)
+        t = TITLES.get(title_id, {})
+        await q.answer(f"✅ Титул выдан: {t.get('label','')}", show_alert=False)
+    await q.edit_message_reply_markup(reply_markup=_dbg_ctitles_kb(uid))
+
+
+async def cb_dbg_ccleart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_ccleart_{uid} — clear active title."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    db.set_active_title(uid, None)
+    await q.answer("✅ Активный титул снят", show_alert=False)
+    await q.edit_message_reply_markup(reply_markup=_dbg_ctitles_kb(uid))
+
+
+def _dbg_cphrases_kb(uid: int) -> InlineKeyboardMarkup:
+    owned = set(db.get_user_cosmetics(uid, "phrase"))
+    rows = []
+    for pid_p, p in PHRASES.items():
+        has = pid_p in owned
+        mark = "✅" if has else "⬜"
+        short = p["text"][:32] + "…" if len(p["text"]) > 32 else p["text"]
+        label = f"{mark} {short}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"dbg_cptoggle_{uid}_{pid_p}")])
+    rows.append([InlineKeyboardButton("← Косметика", callback_data=f"dbg_cosm_{uid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_dbg_cphrases(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_cphrases_{uid} — phrase management."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    await q.edit_message_text(
+        "💬 *Управление фразами*\n_Нажми чтобы выдать/отозвать_",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_dbg_cphrases_kb(uid),
+    )
+
+
+async def cb_dbg_cptoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_cptoggle_{uid}_{phrase_id} — toggle phrase ownership."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    parts = q.data.split("_", 3)  # dbg_cptoggle_{uid}_{phrase_id}
+    uid = int(parts[2])
+    phrase_id = parts[3]
+    owned = set(db.get_user_cosmetics(uid, "phrase"))
+    if phrase_id in owned:
+        db.revoke_cosmetic(uid, "phrase", phrase_id)
+        await q.answer("🗑 Фраза отозвана", show_alert=False)
+    else:
+        db.award_cosmetic(uid, "phrase", phrase_id)
+        await q.answer("✅ Фраза выдана", show_alert=False)
+    await q.edit_message_reply_markup(reply_markup=_dbg_cphrases_kb(uid))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2623,6 +2906,16 @@ def create_application() -> Application:
         ("^dbg_rating_",          cb_dbg_rating),
         ("^dbg_resetcal_",        cb_dbg_resetcal),
         ("^dbg_clearstate_",      cb_dbg_clearstate),
+        ("^dbg_achs_",            cb_dbg_achs),
+        ("^dbg_gach_",            cb_dbg_give_ach),
+        ("^dbg_rach_",            cb_dbg_revoke_ach),
+        ("^dbg_cosm_reset_",      cb_dbg_cosm_reset),
+        ("^dbg_cosm_",            cb_dbg_cosm),
+        ("^dbg_ctitles_",         cb_dbg_ctitles),
+        ("^dbg_ctoggle_",         cb_dbg_ctoggle),
+        ("^dbg_ccleart_",         cb_dbg_ccleart),
+        ("^dbg_cphrases_",        cb_dbg_cphrases),
+        ("^dbg_cptoggle_",        cb_dbg_cptoggle),
         # Casino
         *casino_module.casino_handlers(),
         # FUT
