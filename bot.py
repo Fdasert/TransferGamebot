@@ -2279,8 +2279,8 @@ async def cb_dbg_achs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         text = (
             f"🏆 *Достижения — {_esc(target['display_name'])}*\n"
             f"Заработано: *{len(earned)}/{len(ACHIEVEMENTS)}*\n\n"
-            f"✅ = уже есть \\(нажми чтобы отозвать\\)\n"
-            f"⬜ = нет \\(нажми чтобы выдать\\)"
+            f"✅ \\= уже есть \\(нажми чтобы отозвать\\)\n"
+            f"⬜ \\= нет \\(нажми чтобы выдать\\)"
         )
     except Exception as e:
         logger.exception("cb_dbg_achs error: %s", e)
@@ -2444,7 +2444,7 @@ async def cb_dbg_ctitles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     uid = int(q.data.split("_")[2])
     await q.edit_message_text(
         "🏷 *Управление титулами*\n"
-        "✅ = выдан \\| ✅🏷 = выдан и активен\n"
+        "✅ \\= выдан \\| ✅🏷 \\= выдан и активен\n"
         "_Нажми чтобы выдать/отозвать\\. Для активации — установи через меню косметики игрока_",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=_dbg_ctitles_kb(uid),
