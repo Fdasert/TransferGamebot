@@ -2405,29 +2405,28 @@ async def cb_dbg_cosm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cb_dbg_cosm_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_cosm_reset_{uid} — wipe all cosmetics."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     uid = int(q.data.split("_")[3])
     db.revoke_all_cosmetics(uid)
     target = db.get_user(uid)
+    text = _dbg_cosm_text(uid, target)
+    kb = _dbg_cosm_kb(uid)
     await q.answer("🗑 Вся косметика удалена", show_alert=True)
-    await q.edit_message_text(
-        _dbg_cosm_text(uid, target),
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=_dbg_cosm_kb(uid),
-    )
+    await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
 
 
 def _dbg_ctitles_kb(uid: int) -> InlineKeyboardMarkup:
     owned = set(db.get_user_cosmetics(uid, "title"))
     active = db.get_active_title(uid)
     rows = []
-    for tid, t in TITLES.items():
+    for tid in TITLES:
+        cur = _get_title(tid)   # applies DB overrides
         has = tid in owned
         is_active = tid == active
         mark = "✅🏷" if (has and is_active) else ("✅" if has else "⬜")
-        label = f"{mark} {t['emoji']} {t['label']}"
+        label = f"{mark} {cur.get('emoji','')} {cur.get('label','')}"
         cb = f"dbg_ctoggle_{uid}_{tid}"
         rows.append([InlineKeyboardButton(label, callback_data=cb)])
     if active:
@@ -2455,46 +2454,49 @@ async def cb_dbg_ctitles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 async def cb_dbg_ctoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_ctoggle_{uid}_{title_id} — toggle title ownership."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     parts = q.data.split("_", 3)  # dbg_ctoggle_{uid}_{title_id}
     uid = int(parts[2])
     title_id = parts[3]
     owned = set(db.get_user_cosmetics(uid, "title"))
+    cur = _get_title(title_id)
     if title_id in owned:
         db.revoke_cosmetic(uid, "title", title_id)
-        # If this was the active title, clear it
         if db.get_active_title(uid) == title_id:
             db.set_active_title(uid, None)
-        t = TITLES.get(title_id, {})
-        await q.answer(f"🗑 Титул отозван: {t.get('label','')}", show_alert=False)
+        msg = f"🗑 Отозван: {cur.get('label','')}"
     else:
         db.award_cosmetic(uid, "title", title_id)
-        t = TITLES.get(title_id, {})
-        await q.answer(f"✅ Титул выдан: {t.get('label','')}", show_alert=False)
-    await q.edit_message_reply_markup(reply_markup=_dbg_ctitles_kb(uid))
+        msg = f"✅ Выдан: {cur.get('label','')}"
+    kb = _dbg_ctitles_kb(uid)
+    await q.answer(msg, show_alert=False)
+    await q.edit_message_reply_markup(reply_markup=kb)
 
 
 async def cb_dbg_ccleart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_ccleart_{uid} — clear active title."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     uid = int(q.data.split("_")[2])
     db.set_active_title(uid, None)
+    kb = _dbg_ctitles_kb(uid)
     await q.answer("✅ Активный титул снят", show_alert=False)
-    await q.edit_message_reply_markup(reply_markup=_dbg_ctitles_kb(uid))
+    await q.edit_message_reply_markup(reply_markup=kb)
 
 
 def _dbg_cphrases_kb(uid: int) -> InlineKeyboardMarkup:
     owned = set(db.get_user_cosmetics(uid, "phrase"))
     rows = []
-    for pid_p, p in PHRASES.items():
+    for pid_p in PHRASES:
+        cur = _get_phrase(pid_p)   # applies DB overrides
         has = pid_p in owned
         mark = "✅" if has else "⬜"
-        short = p["text"][:32] + "…" if len(p["text"]) > 32 else p["text"]
+        txt = cur.get("text", "")
+        short = txt[:32] + "…" if len(txt) > 32 else txt
         label = f"{mark} {short}"
         rows.append([InlineKeyboardButton(label, callback_data=f"dbg_cptoggle_{uid}_{pid_p}")])
     rows.append([InlineKeyboardButton("← Косметика", callback_data=f"dbg_cosm_{uid}")])
@@ -2518,8 +2520,8 @@ async def cb_dbg_cphrases(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
 async def cb_dbg_cptoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_cptoggle_{uid}_{phrase_id} — toggle phrase ownership."""
     q = update.callback_query
-    await q.answer()
     if not _is_superadmin(q.from_user.id):
+        await q.answer()
         return
     parts = q.data.split("_", 3)  # dbg_cptoggle_{uid}_{phrase_id}
     uid = int(parts[2])
@@ -2527,11 +2529,13 @@ async def cb_dbg_cptoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     owned = set(db.get_user_cosmetics(uid, "phrase"))
     if phrase_id in owned:
         db.revoke_cosmetic(uid, "phrase", phrase_id)
-        await q.answer("🗑 Фраза отозвана", show_alert=False)
+        msg = "🗑 Фраза отозвана"
     else:
         db.award_cosmetic(uid, "phrase", phrase_id)
-        await q.answer("✅ Фраза выдана", show_alert=False)
-    await q.edit_message_reply_markup(reply_markup=_dbg_cphrases_kb(uid))
+        msg = "✅ Фраза выдана"
+    kb = _dbg_cphrases_kb(uid)
+    await q.answer(msg, show_alert=False)
+    await q.edit_message_reply_markup(reply_markup=kb)
 
 
 # ── Debug: Edit cosmetic definitions ─────────────────────────────────────────
