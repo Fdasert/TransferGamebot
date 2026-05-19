@@ -819,6 +819,27 @@ async def cb_fut_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     new_bal = db.get_coins(uid)
     await _animate_open(q, pack["name"], cards, pack["cost"], new_bal)
 
+    # ── Pack achievements ─────────────────────────────────────────────────
+    _pack_achs = []
+    if db.award_achievement(uid, "first_pack"):
+        _pack_achs.append(("📦", "Первый пак", "Открыть первый пак карточек", 0))
+    if any(c.get("rating") == 97 for c in cards):
+        if db.award_achievement(uid, "got_97"):
+            _pack_achs.append(("👑", "Золотой грааль", "Вытащить карточку OVR 97", 15_000))
+
+    for emoji, name, desc, reward in _pack_achs:
+        if reward:
+            db.add_coins(uid, reward)
+        reward_line = f"\n💰 *\\+{reward:,} монет*".replace(",", " ") if reward else ""
+        try:
+            await ctx.bot.send_message(
+                uid,
+                f"🏅 *НОВОЕ ДОСТИЖЕНИЕ\\!*\n{'─' * 22}\n{emoji} *{name}*\n_{desc}_{reward_line}",
+                parse_mode="MarkdownV2",
+            )
+        except Exception:
+            pass
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HANDLERS — МОЙ КЛУБ

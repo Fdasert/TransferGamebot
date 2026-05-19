@@ -52,6 +52,110 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── Achievement definitions ───────────────────────────────────────────────────
+
+ACHIEVEMENTS: dict[str, dict] = {
+    # ── 🎯 Угадывание трансферов ─────────────────────────────────────────
+    "first_exact": {
+        "emoji": "🎯", "name": "Снайпер",
+        "desc": "Угадать трансфер точно в первый раз",
+        "reward": 500, "secret": False,
+    },
+    "silent_exact": {
+        "emoji": "🤫", "name": "Тихий снайпер",
+        "desc": "Точное попадание без единой подсказки",
+        "reward": 1_000, "secret": False,
+    },
+    "hattrick": {
+        "emoji": "🔱", "name": "Хет-трик",
+        "desc": "Три точных попадания в одной игре",
+        "reward": 2_000, "secret": False,
+    },
+    "perfect_game": {
+        "emoji": "💎", "name": "Идеальная игра",
+        "desc": "Три точных попадания без единой подсказки",
+        "reward": 5_000, "secret": False,
+    },
+    "no_hints_win": {
+        "emoji": "🧠", "name": "Чистая победа",
+        "desc": "Победа без использования подсказок",
+        "reward": 2_000, "secret": False,
+    },
+    "exact_10": {
+        "emoji": "🏹", "name": "Глаз-алмаз",
+        "desc": "10 точных попаданий суммарно",
+        "reward": 3_000, "secret": False,
+    },
+    "exact_50": {
+        "emoji": "🦅", "name": "Орлиный глаз",
+        "desc": "50 точных попаданий суммарно",
+        "reward": 10_000, "secret": False,
+    },
+    "exact_100": {
+        "emoji": "🔮", "name": "Оракул",
+        "desc": "100 точных попаданий суммарно",
+        "reward": 25_000, "secret": True,
+    },
+    # ── 🏆 Соревновательные ──────────────────────────────────────────────
+    "first_win": {
+        "emoji": "⚡", "name": "Первая победа",
+        "desc": "Одержать первую победу",
+        "reward": 500, "secret": False,
+    },
+    "calibrated": {
+        "emoji": "📊", "name": "Откалиброван",
+        "desc": "Завершить калибровку и получить рейтинг",
+        "reward": 1_000, "secret": False,
+    },
+    "win_streak_3": {
+        "emoji": "🔥", "name": "На коне",
+        "desc": "3 победы подряд",
+        "reward": 1_500, "secret": False,
+    },
+    "win_streak_5": {
+        "emoji": "💥", "name": "Доминатор",
+        "desc": "5 побед подряд",
+        "reward": 5_000, "secret": True,
+    },
+    "rating_1000": {
+        "emoji": "🥈", "name": "Эксперт",
+        "desc": "Достичь рейтинга 1000",
+        "reward": 3_000, "secret": False,
+    },
+    "rating_1500": {
+        "emoji": "🥇", "name": "Мастер",
+        "desc": "Достичь рейтинга 1500",
+        "reward": 8_000, "secret": True,
+    },
+    "games_10": {
+        "emoji": "🎮", "name": "Втянулся",
+        "desc": "Сыграть 10 игр",
+        "reward": 1_000, "secret": False,
+    },
+    "games_50": {
+        "emoji": "🏟", "name": "Старожил",
+        "desc": "Сыграть 50 игр",
+        "reward": 5_000, "secret": False,
+    },
+    # ── ⚽ FUT Клуб ──────────────────────────────────────────────────────
+    "first_pack": {
+        "emoji": "📦", "name": "Первый пак",
+        "desc": "Открыть первый пак карточек",
+        "reward": 0, "secret": False,
+    },
+    "got_97": {
+        "emoji": "👑", "name": "Золотой грааль",
+        "desc": "Вытащить карточку OVR 97",
+        "reward": 15_000, "secret": True,
+    },
+    "rich_100k": {
+        "emoji": "💰", "name": "Нувориш",
+        "desc": "Накопить 100,000 монет",
+        "reward": 0, "secret": True,
+    },
+}
+
+
 # ── Keyboard helpers ─────────────────────────────────────────────────────────
 
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -340,10 +444,51 @@ async def cb_menu_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     if not user:
         await q.edit_message_text("Сначала зарегистрируйся через /start")
         return
+    profile_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏅 Достижения", callback_data="achievements")],
+        [InlineKeyboardButton("← В меню", callback_data="menu_back")],
+    ])
     await q.edit_message_text(
         profile_text(user),
         parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=back_kb(),
+        reply_markup=profile_kb,
+    )
+
+
+async def cb_achievements(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    earned_ids = set(db.get_user_achievements(uid))
+    total = len(ACHIEVEMENTS)
+    earned_count = len(earned_ids)
+
+    lines = [f"🏅 *ДОСТИЖЕНИЯ* — {earned_count}/{total}\n"]
+
+    categories = [
+        ("🎯 Угадывание трансферов", ["first_exact", "silent_exact", "hattrick", "perfect_game", "no_hints_win", "exact_10", "exact_50", "exact_100"]),
+        ("🏆 Соревновательные", ["first_win", "calibrated", "win_streak_3", "win_streak_5", "rating_1000", "rating_1500", "games_10", "games_50"]),
+        ("⚽ FUT Клуб", ["first_pack", "got_97", "rich_100k"]),
+    ]
+
+    for cat_name, ach_ids in categories:
+        lines.append(f"\n*{_esc(cat_name)}*")
+        for ach_id in ach_ids:
+            ach = ACHIEVEMENTS[ach_id]
+            if ach_id in earned_ids:
+                lines.append(f"✅ {ach['emoji']} *{_esc(ach['name'])}* — _{_esc(ach['desc'])}_")
+            elif ach.get("secret"):
+                lines.append(f"🔒 *???* — _Секретное достижение_")
+            else:
+                lines.append(f"⬜ {ach['emoji']} *{_esc(ach['name'])}* — _{_esc(ach['desc'])}_")
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("← Назад", callback_data="menu_profile"),
+        ]]),
     )
 
 
@@ -1106,6 +1251,120 @@ async def _handle_guess(
         )
 
 
+# ── Achievement checker ───────────────────────────────────────────────────────
+
+async def _check_achievements(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    uid: int,
+    *,
+    my_rounds: list[dict],
+    won: bool,
+    lost: bool,
+    my_score: int,
+    new_rating: int,
+    just_calibrated: bool,
+    user_before: dict,
+) -> None:
+    """Check all achievements for a player after a game. Awards coins for new ones."""
+    earned_set = set(db.get_user_achievements(uid))
+    newly_earned: list[str] = []
+
+    def _try_award(ach_id: str) -> bool:
+        if ach_id in earned_set:
+            return False
+        if db.award_achievement(uid, ach_id):
+            earned_set.add(ach_id)
+            newly_earned.append(ach_id)
+            return True
+        return False
+
+    completed = [r for r in my_rounds if r.get("completed")]
+    exact_rounds = [r for r in completed if r.get("accuracy_tier") == "exact"]
+    total_hints = sum(r.get("hints_used", 0) or 0 for r in completed)
+    silent_exacts = [r for r in exact_rounds if (r.get("hints_used") or 0) == 0]
+
+    # ── Transfer guessing ─────────────────────────────────────────────────
+    if exact_rounds:
+        _try_award("first_exact")
+    if silent_exacts:
+        _try_award("silent_exact")
+    if len(exact_rounds) >= 3:
+        _try_award("hattrick")
+    if len(exact_rounds) >= 3 and total_hints == 0:
+        _try_award("perfect_game")
+    if won and total_hints == 0:
+        _try_award("no_hints_win")
+
+    # Cumulative exact guesses
+    if exact_rounds:
+        total_exact = db.get_total_exact_guesses(uid)
+        if total_exact >= 10:
+            _try_award("exact_10")
+        if total_exact >= 50:
+            _try_award("exact_50")
+        if total_exact >= 100:
+            _try_award("exact_100")
+
+    # ── Competitive ───────────────────────────────────────────────────────
+    if won:
+        if user_before.get("wins", 0) == 0:
+            _try_award("first_win")
+        streak = db.get_win_streak(uid) + 1
+        db.set_win_streak(uid, streak)
+        if streak >= 3:
+            _try_award("win_streak_3")
+        if streak >= 5:
+            _try_award("win_streak_5")
+    elif lost:
+        db.set_win_streak(uid, 0)
+
+    if just_calibrated:
+        _try_award("calibrated")
+
+    if new_rating >= 1000:
+        _try_award("rating_1000")
+    if new_rating >= 1500:
+        _try_award("rating_1500")
+
+    games_after = user_before.get("games_played", 0) + 1
+    if games_after >= 10:
+        _try_award("games_10")
+    if games_after >= 50:
+        _try_award("games_50")
+
+    # Coin balance check
+    user_now = db.get_user(uid)
+    if user_now and user_now.get("coins", 0) >= 100_000:
+        _try_award("rich_100k")
+
+    if not newly_earned:
+        return
+
+    # ── Send achievement notification ─────────────────────────────────────
+    for ach_id in newly_earned:
+        ach = ACHIEVEMENTS.get(ach_id, {})
+        reward = ach.get("reward", 0)
+        if reward:
+            db.add_coins(uid, reward)
+
+        emoji = ach.get("emoji", "🏅")
+        name = ach.get("name", ach_id)
+        desc = ach.get("desc", "")
+        reward_line = f"\n💰 *\\+{reward:,} монет*".replace(",", " ") if reward else ""
+
+        text = (
+            f"🏅 *НОВОЕ ДОСТИЖЕНИЕ\\!*\n"
+            f"{'─' * 22}\n"
+            f"{emoji} *{_esc(name)}*\n"
+            f"_{_esc(desc)}_"
+            f"{reward_line}"
+        )
+        try:
+            await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN_V2)
+        except TelegramError:
+            pass
+
+
 # ── Game finish ───────────────────────────────────────────────────────────────
 
 async def _finish_game(
@@ -1193,6 +1452,9 @@ async def _finish_game(
     )
 
     db.apply_elo_result(p1, p2, new_r1, new_r2, a_won)
+
+    # Save old user dicts BEFORE re-fetch (needed for achievement checks)
+    old_p1, old_p2 = p1, p2
 
     # Refresh for display
     p1 = db.get_user(p1_id)
@@ -1372,6 +1634,28 @@ async def _finish_game(
 
     await _send_result(p1_id, p1_score, p2_score, p2, new_r1, old_r1, delta1, p1_coins, p1_coin_breakdown, mode1)
     await _send_result(p2_id, p2_score, p1_score, p1, new_r2, old_r2, delta2, p2_coins, p2_coin_breakdown, mode2)
+
+    # ── Check achievements for both players ───────────────────────────────
+    await _check_achievements(
+        ctx, p1_id,
+        my_rounds=rounds_p1,
+        won=(winner_id == p1_id),
+        lost=(winner_id == p2_id),
+        my_score=p1_score,
+        new_rating=new_r1,
+        just_calibrated=just_finished_cal1,
+        user_before=old_p1,
+    )
+    await _check_achievements(
+        ctx, p2_id,
+        my_rounds=rounds_p2,
+        won=(winner_id == p2_id),
+        lost=(winner_id == p1_id),
+        my_score=p2_score,
+        new_rating=new_r2,
+        just_calibrated=just_finished_cal2,
+        user_before=old_p2,
+    )
 
 
 # ── Rematch ───────────────────────────────────────────────────────────────────
@@ -2025,6 +2309,7 @@ def create_application() -> Application:
         # Menu
         ("^menu_play$",           cb_menu_play),
         ("^menu_profile$",        cb_menu_profile),
+        ("^achievements$",        cb_achievements),
         ("^menu_leaderboard$",    cb_menu_leaderboard),
         ("^menu_help$",           cb_menu_help),
         ("^menu_back$",           cb_menu_back),

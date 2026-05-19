@@ -666,6 +666,56 @@ def apply_elo_result(
     )
 
 
+# ── Achievements ─────────────────────────────────────────────────────────────
+
+def get_user_achievements(user_id: int) -> list[str]:
+    """Return list of achievement_id strings the user has earned."""
+    res = (
+        get_client()
+        .table("fut_achievements")
+        .select("achievement_id, earned_at")
+        .eq("user_id", user_id)
+        .order("earned_at")
+        .execute()
+    )
+    return [r["achievement_id"] for r in (res.data or [])]
+
+
+def award_achievement(user_id: int, achievement_id: str) -> bool:
+    """Award achievement if not already earned. Returns True if newly awarded."""
+    try:
+        get_client().table("fut_achievements").insert({
+            "user_id": user_id,
+            "achievement_id": achievement_id,
+        }).execute()
+        return True
+    except Exception:
+        return False  # UNIQUE constraint — already earned
+
+
+def get_total_exact_guesses(user_id: int) -> int:
+    """Count all-time exact guesses for a user from game_rounds."""
+    res = (
+        get_client()
+        .table("game_rounds")
+        .select("id")
+        .eq("guesser_id", user_id)
+        .eq("accuracy_tier", "exact")
+        .eq("completed", True)
+        .execute()
+    )
+    return len(res.data or [])
+
+
+def get_win_streak(user_id: int) -> int:
+    user = get_user(user_id)
+    return user.get("win_streak", 0) if user else 0
+
+
+def set_win_streak(user_id: int, streak: int) -> None:
+    update_user(user_id, win_streak=streak)
+
+
 # ── Cubeasses Supabase (кросс-бот обменник) ──────────────────────────────────
 
 import os as _os
