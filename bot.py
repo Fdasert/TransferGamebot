@@ -1346,7 +1346,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_guess(update, ctx, text, data)
     elif action == "training_guessing":
         await _handle_training_guess(update, ctx, text, data)
-    elif action in ("dbg_set_coins", "dbg_set_rating"):
+    elif action in ("dbg_set_coins", "dbg_set_rating") or (
+        action.startswith(("dbg_editt_", "dbg_editp_")) and _is_superadmin(user_id)
+    ):
         if _is_superadmin(user_id):
             await _handle_dbg_input(update, ctx, action, data)
     elif await fut_module.handle_fut_text(update, ctx):
