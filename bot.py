@@ -156,6 +156,50 @@ ACHIEVEMENTS: dict[str, dict] = {
 }
 
 
+# ── Cosmetic definitions ──────────────────────────────────────────────────────
+
+TITLES: dict[str, dict] = {
+    "silent":       {"emoji": "🤫", "label": "Тихоня",        "from_ach": "silent_exact"},
+    "hattrick":     {"emoji": "🔱", "label": "Хет-трикер",    "from_ach": "hattrick"},
+    "perfect":      {"emoji": "💎", "label": "Перфекционист", "from_ach": "perfect_game"},
+    "telepath":     {"emoji": "🧠", "label": "Телепат",       "from_ach": "no_hints_win"},
+    "archer":       {"emoji": "🏹", "label": "Лучник",        "from_ach": "exact_10"},
+    "eagle":        {"emoji": "🦅", "label": "Снайпер",       "from_ach": "exact_50"},
+    "oracle":       {"emoji": "🔮", "label": "Оракул",        "from_ach": "exact_100"},
+    "onfire":       {"emoji": "🔥", "label": "Горящий",       "from_ach": "win_streak_3"},
+    "dominator":    {"emoji": "💥", "label": "Доминатор",     "from_ach": "win_streak_5"},
+    "master":       {"emoji": "🥇", "label": "Мастер",        "from_ach": "rating_1500"},
+}
+
+PHRASES: dict[str, dict] = {
+    "p_sniper":     {"text": "🎯 Угадал с первого раза. Случайность? Навряд ли.", "from_ach": "first_exact"},
+    "p_silent":     {"text": "🤫 Мне не нужны подсказки.",                         "from_ach": "silent_exact"},
+    "p_hattrick":   {"text": "🔱 Три из трёх. Просто подумай об этом.",            "from_ach": "hattrick"},
+    "p_perfect":    {"text": "💎 Идеальная игра. Ты видел что-нибудь подобное?",  "from_ach": "perfect_game"},
+    "p_telepath":   {"text": "🧠 Победил без единой подсказки.",                   "from_ach": "no_hints_win"},
+    "p_eagle":      {"text": "🦅 50 точных. Я просто знаю цены.",                  "from_ach": "exact_50"},
+    "p_oracle":     {"text": "🔮 100 точных попаданий. Я и есть рынок.",           "from_ach": "exact_100"},
+    "p_onfire":     {"text": "🔥 Три подряд. Ты уверен что хочешь продолжать?",   "from_ach": "win_streak_3"},
+    "p_dominator":  {"text": "💥 Пять побед подряд. Добро пожаловать в мой кошмар.", "from_ach": "win_streak_5"},
+    "p_master":     {"text": "🥇 Мастер рынка приветствует тебя.",                 "from_ach": "rating_1500"},
+}
+
+# achievement_id → list of (cosmetic_type, cosmetic_id) to award
+ACH_COSMETICS: dict[str, list[tuple[str, str]]] = {
+    "first_exact":  [("phrase", "p_sniper")],
+    "silent_exact": [("title", "silent"),    ("phrase", "p_silent")],
+    "hattrick":     [("title", "hattrick"),  ("phrase", "p_hattrick")],
+    "perfect_game": [("title", "perfect"),   ("phrase", "p_perfect")],
+    "no_hints_win": [("title", "telepath"),  ("phrase", "p_telepath")],
+    "exact_10":     [("title", "archer")],
+    "exact_50":     [("title", "eagle"),     ("phrase", "p_eagle")],
+    "exact_100":    [("title", "oracle"),    ("phrase", "p_oracle")],
+    "win_streak_3": [("title", "onfire"),    ("phrase", "p_onfire")],
+    "win_streak_5": [("title", "dominator"), ("phrase", "p_dominator")],
+    "rating_1500":  [("title", "master"),    ("phrase", "p_master")],
+}
+
+
 # ── Keyboard helpers ─────────────────────────────────────────────────────────
 
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -322,12 +366,16 @@ def profile_text(user: dict) -> str:
     losses = user.get("losses", 0)
     coins = user.get("coins", 0)
     wr = f"{wins/gp*100:.0f}%" if gp else "—"
+    titles = db.get_user_cosmetics(user["user_id"], "title")
+    phrases = db.get_user_cosmetics(user["user_id"], "phrase")
+    cosmetics_line = f"\n🎨 Косметика: {len(titles)} титул\\(ов\\) · {len(phrases)} фраз\\(ы\\)" if (titles or phrases) else ""
     return (
-        f"👤 *{_esc(user['display_name'])}*\n"
+        f"👤 *{_esc(_display_name(user))}*\n"
         f"🏅 Рейтинг: *{_esc(rating_display(user))}*\n"
         f"🪙 Монеты: *{coins}*\n"
         f"🎮 Игр: {gp} \\| ✅ Побед: {wins} \\| ❌ Поражений: {losses}\n"
         f"📊 Винрейт: {wr}"
+        f"{cosmetics_line}"
     )
 
 
@@ -336,6 +384,16 @@ def _esc(text: str) -> str:
     for ch in r"\_*[]()~`>#+-=|{}.!":
         text = text.replace(ch, f"\\{ch}")
     return text
+
+
+def _display_name(user: dict) -> str:
+    """Return display name with active title prefix if set."""
+    name = user.get("display_name", "?")
+    title_id = user.get("active_title")
+    if title_id and title_id in TITLES:
+        t = TITLES[title_id]
+        return f"{t['emoji']} {t['label']} • {name}"
+    return name
 
 
 def tier_effect(tier: str, points: int) -> str:
@@ -445,7 +503,8 @@ async def cb_menu_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         await q.edit_message_text("Сначала зарегистрируйся через /start")
         return
     profile_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏅 Достижения", callback_data="achievements")],
+        [InlineKeyboardButton("🏅 Достижения", callback_data="achievements"),
+         InlineKeyboardButton("🎨 Косметика", callback_data="cosmetics_menu")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
     await q.edit_message_text(
@@ -492,6 +551,169 @@ async def cb_achievements(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def cb_cosmetics_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Main cosmetics menu: shows titles and phrases."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    owned_titles = db.get_user_cosmetics(uid, "title")
+    owned_phrases = db.get_user_cosmetics(uid, "phrase")
+    active_title = db.get_active_title(uid)
+
+    lines = ["🎨 *КОСМЕТИКА*\n"]
+
+    if owned_titles:
+        lines.append("*🏷 Титулы:*")
+        for tid in owned_titles:
+            t = TITLES.get(tid, {})
+            active_mark = " ✅" if tid == active_title else ""
+            lines.append(f"  {t.get('emoji','')} {_esc(t.get('label','?'))}{active_mark}")
+    else:
+        lines.append("_Нет титулов — зарабатывай достижения\\!_")
+
+    if owned_phrases:
+        lines.append("\n*💬 Фразы:*")
+        for pid_p in owned_phrases:
+            p = PHRASES.get(pid_p, {})
+            lines.append(f"  _{_esc(p.get('text', ''))}_")
+
+    rows = []
+    if owned_titles:
+        rows.append([InlineKeyboardButton("🏷 Выбрать титул", callback_data="cosmetics_titles")])
+    rows.append([InlineKeyboardButton("← Профиль", callback_data="menu_profile")])
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_cosmetics_titles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """List owned titles with option to set/clear active."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    owned_titles = db.get_user_cosmetics(uid, "title")
+    active_title = db.get_active_title(uid)
+
+    rows = []
+    for tid in owned_titles:
+        t = TITLES.get(tid, {})
+        label = f"{t.get('emoji','')} {t.get('label','?')}"
+        if tid == active_title:
+            label += " ✅"
+        rows.append([InlineKeyboardButton(label, callback_data=f"set_title_{tid}")])
+
+    if active_title:
+        rows.append([InlineKeyboardButton("❌ Снять титул", callback_data="set_title_none")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data="cosmetics_menu")])
+
+    await q.edit_message_text(
+        "🏷 *Выбери активный титул:*\n_Он будет виден всем игрокам\\._",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cb_set_title(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """set_title_<title_id> or set_title_none — set or clear active title."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    data = q.data  # e.g. "set_title_oracle" or "set_title_none"
+    title_id = data[len("set_title_"):]
+
+    if title_id == "none":
+        db.set_active_title(uid, None)
+        await q.answer("Титул снят", show_alert=False)
+    else:
+        owned = db.get_user_cosmetics(uid, "title")
+        if title_id in owned:
+            db.set_active_title(uid, title_id)
+            t = TITLES.get(title_id, {})
+            await q.answer(f"Титул установлен: {t.get('emoji','')} {t.get('label','')}", show_alert=False)
+
+    # Refresh titles screen
+    await cb_cosmetics_titles(update, ctx)
+
+
+async def cb_taunt_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """taunt_menu_<opponent_id> — show phrase selection to taunt opponent."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    opp_id = int(q.data.split("_")[-1])
+
+    owned_phrases = db.get_user_cosmetics(uid, "phrase")
+    if not owned_phrases:
+        await q.answer("У тебя нет фраз!", show_alert=True)
+        return
+
+    rows = []
+    for pid_p in owned_phrases:
+        p = PHRASES.get(pid_p, {})
+        short = p.get("text", "")[:35] + "…" if len(p.get("text","")) > 35 else p.get("text","")
+        rows.append([InlineKeyboardButton(short, callback_data=f"taunt_send_{pid_p}_{opp_id}")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="taunt_cancel")])
+
+    await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def cb_taunt_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """taunt_send_<phrase_id>_<opponent_id> — send the taunt phrase to opponent."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    parts = q.data.split("_")
+    # format: taunt_send_<phrase_id>_<opp_id>
+    # phrase_id may contain underscores (e.g. p_sniper), opp_id is last part
+    opp_id = int(parts[-1])
+    phrase_id = "_".join(parts[2:-1])
+
+    owned_phrases = db.get_user_cosmetics(uid, "phrase")
+    if phrase_id not in owned_phrases:
+        await q.answer("Фраза не найдена.", show_alert=True)
+        return
+
+    phrase = PHRASES.get(phrase_id, {})
+    sender = db.get_user(uid)
+    sender_name = _display_name(sender) if sender else "Соперник"
+
+    phrase_text = phrase.get("text", "")
+    msg = (
+        f"💬 *{_esc(sender_name)}:*\n"
+        f"_{_esc(phrase_text)}_"
+    )
+    try:
+        await ctx.bot.send_message(opp_id, msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await q.answer("Фраза отправлена! 💬", show_alert=False)
+    except TelegramError:
+        await q.answer("Не удалось отправить.", show_alert=True)
+
+    # Restore original result keyboard
+    await q.edit_message_reply_markup(
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Реванш", callback_data="result_rematch"),
+            InlineKeyboardButton("🏠 Меню", callback_data="menu_back"),
+        ]])
+    )
+
+
+async def cb_taunt_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_reply_markup(
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Реванш", callback_data="result_rematch"),
+            InlineKeyboardButton("🏠 Меню", callback_data="menu_back"),
+        ]])
+    )
+
+
 async def cb_menu_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -504,7 +726,7 @@ async def cb_menu_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     medals = ["🥇", "🥈", "🥉"]
     for i, u in enumerate(leaders):
         medal = medals[i] if i < 3 else f"{i+1}\\."
-        name = _esc(u["display_name"])
+        name = _esc(_display_name(u))
         rating = _esc(rating_display(u))
         gp = u.get("games_played", 0)
         lines.append(f"{medal} *{name}* — {rating} \\({gp} игр\\)")
@@ -637,7 +859,7 @@ async def cb_select_opponent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     try:
         await ctx.bot.send_message(
             target["user_id"],
-            f"⚔️ *{_esc(user['display_name'])}* вызывает тебя\\!\n\n"
+            f"⚔️ *{_esc(_display_name(user))}* вызывает тебя\\!\n\n"
             f"🏅 Рейтинг: {_esc(rating_display(user))}\n"
             f"🎮 Игр: {gp_c} \\| ✅ Побед: {wins_c} \\| ❌ Поражений: {losses_c}\n"
             f"📊 Винрейт: {_esc(wr_c)}",
@@ -1364,6 +1586,36 @@ async def _check_achievements(
         except TelegramError:
             pass
 
+    # ── Award cosmetics for new achievements ──────────────────────────────
+    for ach_id in newly_earned:
+        for c_type, c_id in ACH_COSMETICS.get(ach_id, []):
+            if db.award_cosmetic(uid, c_type, c_id):
+                if c_type == "title":
+                    t = TITLES.get(c_id, {})
+                    text = (
+                        f"🎨 *НОВАЯ КОСМЕТИКА\\!*\n"
+                        f"{'─' * 22}\n"
+                        f"🏷 *Титул разблокирован:* {t.get('emoji','')} {_esc(t.get('label',''))}\n"
+                        f"_Установи его в Профиль → Косметика_"
+                    )
+                    try:
+                        await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN_V2)
+                    except TelegramError:
+                        pass
+                elif c_type == "phrase":
+                    p = PHRASES.get(c_id, {})
+                    text = (
+                        f"🎨 *НОВАЯ КОСМЕТИКА\\!*\n"
+                        f"{'─' * 22}\n"
+                        f"💬 *Фраза разблокирована:*\n"
+                        f"_{_esc(p.get('text', ''))}_\n"
+                        f"_Используй её после матча\\!_"
+                    )
+                    try:
+                        await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN_V2)
+                    except TelegramError:
+                        pass
+
 
 # ── Game finish ───────────────────────────────────────────────────────────────
 
@@ -1622,12 +1874,26 @@ async def _finish_game(
             f"{rating_block}"
         )
 
+        # Build result keyboard with optional taunt button
+        res_rows = [
+            [InlineKeyboardButton("🔄 Реванш", callback_data="result_rematch"),
+             InlineKeyboardButton("🏠 Меню", callback_data="menu_back")],
+        ]
+        my_phrases = db.get_user_cosmetics(pid, "phrase")
+        opp_id = p2_id if pid == p1_id else p1_id
+        if my_phrases:
+            res_rows.append([InlineKeyboardButton(
+                "💬 Дразнить соперника",
+                callback_data=f"taunt_menu_{opp_id}",
+            )])
+        result_markup = InlineKeyboardMarkup(res_rows)
+
         await clear_state(pid)
         try:
             await ctx.bot.send_message(
                 pid, text,
                 parse_mode=ParseMode.MARKDOWN_V2,
-                reply_markup=result_kb(),
+                reply_markup=result_markup,
             )
         except TelegramError as e:
             logger.warning("Could not send result to %s: %s", pid, e)
@@ -2310,6 +2576,12 @@ def create_application() -> Application:
         ("^menu_play$",           cb_menu_play),
         ("^menu_profile$",        cb_menu_profile),
         ("^achievements$",        cb_achievements),
+        ("^cosmetics_menu$",      cb_cosmetics_menu),
+        ("^cosmetics_titles$",    cb_cosmetics_titles),
+        ("^set_title_",           cb_set_title),
+        ("^taunt_menu_",          cb_taunt_menu),
+        ("^taunt_send_",          cb_taunt_send),
+        ("^taunt_cancel$",        cb_taunt_cancel),
         ("^menu_leaderboard$",    cb_menu_leaderboard),
         ("^menu_help$",           cb_menu_help),
         ("^menu_back$",           cb_menu_back),

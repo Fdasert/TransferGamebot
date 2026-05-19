@@ -716,6 +716,39 @@ def set_win_streak(user_id: int, streak: int) -> None:
     update_user(user_id, win_streak=streak)
 
 
+# ── Cosmetics ─────────────────────────────────────────────────────────────────
+
+def get_user_cosmetics(user_id: int, cosmetic_type: str | None = None) -> list[str]:
+    """Return list of cosmetic_ids of the given type (or all types) owned by user."""
+    q = get_client().table("fut_cosmetics").select("cosmetic_id, cosmetic_type").eq("user_id", user_id)
+    if cosmetic_type:
+        q = q.eq("cosmetic_type", cosmetic_type)
+    res = q.order("unlocked_at").execute()
+    return [r["cosmetic_id"] for r in (res.data or [])]
+
+
+def award_cosmetic(user_id: int, cosmetic_type: str, cosmetic_id: str) -> bool:
+    """Award cosmetic if not already owned. Returns True if newly awarded."""
+    try:
+        get_client().table("fut_cosmetics").insert({
+            "user_id": user_id,
+            "cosmetic_type": cosmetic_type,
+            "cosmetic_id": cosmetic_id,
+        }).execute()
+        return True
+    except Exception:
+        return False
+
+
+def get_active_title(user_id: int) -> str | None:
+    user = get_user(user_id)
+    return user.get("active_title") if user else None
+
+
+def set_active_title(user_id: int, title_id: str | None) -> None:
+    update_user(user_id, active_title=title_id)
+
+
 # ── Cubeasses Supabase (кросс-бот обменник) ──────────────────────────────────
 
 import os as _os
