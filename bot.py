@@ -778,6 +778,77 @@ async def cb_taunt_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+# ── In-game taunts ────────────────────────────────────────────────────────────
+
+def _taunt_game_kb(opp_id: int) -> InlineKeyboardMarkup:
+    """Keyboard shown while waiting / guessing: just the taunt button."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{opp_id}"),
+    ]])
+
+
+async def cb_taunt_game_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """taunt_game_{opp_id} — phrase selection during a live game."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    opp_id = int(q.data.split("_")[-1])
+
+    owned_phrases = db.get_user_cosmetics(uid, "phrase")
+    if not owned_phrases:
+        await q.answer("У тебя нет фраз!", show_alert=True)
+        return
+
+    rows = []
+    for pid_p in owned_phrases:
+        p = _get_phrase(pid_p)
+        txt = p.get("text", "")
+        short = txt[:35] + "…" if len(txt) > 35 else txt
+        rows.append([InlineKeyboardButton(short, callback_data=f"taunt_gsend_{pid_p}_{opp_id}")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"taunt_gcancel_{opp_id}")])
+    await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def cb_taunt_game_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """taunt_gsend_{phrase_id}_{opp_id} — send taunt during game.
+    phrase_id may contain underscores (p_sniper), opp_id is always numeric last segment.
+    """
+    q = update.callback_query
+    uid = q.from_user.id
+    # Strip prefix, then split off last segment (opp_id) from right
+    suffix = q.data[len("taunt_gsend_"):]          # "p_sniper_123456"
+    phrase_id, opp_str = suffix.rsplit("_", 1)      # "p_sniper", "123456"
+    opp_id = int(opp_str)
+
+    owned_phrases = db.get_user_cosmetics(uid, "phrase")
+    if phrase_id not in owned_phrases:
+        await q.answer("Фраза не найдена.", show_alert=True)
+        return
+
+    phrase = _get_phrase(phrase_id)
+    sender = db.get_user(uid)
+    sender_name = _display_name(sender) if sender else "Соперник"
+    phrase_text = phrase.get("text", "")
+
+    msg = f"💬 *{_esc(sender_name)}:*\n_{_esc(phrase_text)}_"
+    try:
+        await ctx.bot.send_message(opp_id, msg, parse_mode=ParseMode.MARKDOWN_V2)
+        await q.answer("💬 Отправлено!", show_alert=False)
+    except TelegramError:
+        await q.answer("Не удалось отправить.", show_alert=True)
+
+    # Restore taunt button so they can taunt again
+    await q.edit_message_reply_markup(reply_markup=_taunt_game_kb(opp_id))
+
+
+async def cb_taunt_game_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """taunt_gcancel_{opp_id} — cancel phrase selection, restore taunt button."""
+    q = update.callback_query
+    await q.answer()
+    opp_id = int(q.data.split("_")[-1])
+    await q.edit_message_reply_markup(reply_markup=_taunt_game_kb(opp_id))
+
+
 async def cb_menu_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -1243,19 +1314,22 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     picker = db.get_user(user_id)
     picker_name = picker["display_name"] if picker else "Соперник"
 
+    picker_phrases = db.get_user_cosmetics(user_id, "phrase")
+    picker_wait_kb = _taunt_game_kb(opponent_id) if picker_phrases else None
     await q.edit_message_text(
         f"✅ Трансфер выбран\\!\n\n"
         f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
         f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
         f"Ждём ответа соперника\\.\\.\\.",
         parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=picker_wait_kb,
     )
 
     game = db.get_game(game_id)
     p1_score = game["player1_score"]
     p2_score = game["player2_score"]
 
-    await _send_guess_prompt(ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name)
+    await _send_guess_prompt(ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name, picker_id=user_id)
 
 
 async def _send_guess_prompt(
@@ -1268,6 +1342,7 @@ async def _send_guess_prompt(
     p1_score: int,
     p2_score: int,
     picker_name: str,
+    picker_id: int | None = None,
 ) -> None:
     hint_lines = _build_hint_lines(transfer, used_hint_types)
     can_hint = hints_used < MAX_HINTS
@@ -1290,6 +1365,12 @@ async def _send_guess_prompt(
         available = [h for h in HINT_TYPES if h not in used_hint_types]
         for h in available:
             kb_rows.append([InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"gh_{h}")])
+
+    # Add taunt button if guesser has phrases and we know who the picker is
+    if picker_id:
+        guesser_phrases = db.get_user_cosmetics(guesser_id, "phrase")
+        if guesser_phrases:
+            kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{picker_id}")])
 
     kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
     await _send_photo_message(ctx, guesser_id, transfer.get("photo_url"), text, kb)
@@ -1353,9 +1434,14 @@ async def cb_hint(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     await q.answer(f"{label}: {val_str}", show_alert=True)
 
-    # Update keyboard — remove used hint, keep remaining
+    # Update keyboard — remove used hint, keep remaining + preserve taunt button
     remaining = [h for h in HINT_TYPES if h not in used]
     kb_rows = [[InlineKeyboardButton(f"💡 {HINT_LABELS[h]}", callback_data=f"gh_{h}")] for h in remaining]
+    picker_id = data.get("picker_id")
+    if picker_id:
+        guesser_phrases = db.get_user_cosmetics(user_id, "phrase")
+        if guesser_phrases:
+            kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{picker_id}")])
     try:
         await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
     except TelegramError:
@@ -3381,6 +3467,9 @@ def create_application() -> Application:
         ("^taunt_menu_",          cb_taunt_menu),
         ("^taunt_send_",          cb_taunt_send),
         ("^taunt_cancel$",        cb_taunt_cancel),
+        ("^taunt_gsend_",         cb_taunt_game_send),
+        ("^taunt_game_",          cb_taunt_game_menu),
+        ("^taunt_gcancel_",       cb_taunt_game_cancel),
         ("^menu_leaderboard$",    cb_menu_leaderboard),
         ("^menu_help$",           cb_menu_help),
         ("^menu_back$",           cb_menu_back),
