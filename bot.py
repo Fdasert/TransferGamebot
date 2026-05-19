@@ -628,7 +628,7 @@ async def cb_cosmetics_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     if owned_titles:
         lines.append("*🏷 Титулы:*")
         for tid in owned_titles:
-            t = TITLES.get(tid, {})
+            t = _get_title(tid)
             active_mark = " ✅" if tid == active_title else ""
             lines.append(f"  {t.get('emoji','')} {_esc(t.get('label','?'))}{active_mark}")
     else:
@@ -637,8 +637,9 @@ async def cb_cosmetics_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     if owned_phrases:
         lines.append("\n*💬 Фразы:*")
         for pid_p in owned_phrases:
-            p = PHRASES.get(pid_p, {})
+            p = _get_phrase(pid_p)
             lines.append(f"  _{_esc(p.get('text', ''))}_")
+        lines.append("\n_💡 Фразы можно использовать в конце матча — кнопка «💬 Дразнить соперника»_")
 
     rows = []
     if owned_titles:
@@ -663,7 +664,7 @@ async def cb_cosmetics_titles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
     rows = []
     for tid in owned_titles:
-        t = TITLES.get(tid, {})
+        t = _get_title(tid)
         label = f"{t.get('emoji','')} {t.get('label','?')}"
         if tid == active_title:
             label += " ✅"
@@ -716,8 +717,9 @@ async def cb_taunt_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     rows = []
     for pid_p in owned_phrases:
-        p = PHRASES.get(pid_p, {})
-        short = p.get("text", "")[:35] + "…" if len(p.get("text","")) > 35 else p.get("text","")
+        p = _get_phrase(pid_p)
+        txt = p.get("text", "")
+        short = txt[:35] + "…" if len(txt) > 35 else txt
         rows.append([InlineKeyboardButton(short, callback_data=f"taunt_send_{pid_p}_{opp_id}")])
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="taunt_cancel")])
 
@@ -741,7 +743,7 @@ async def cb_taunt_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await q.answer("Фраза не найдена.", show_alert=True)
         return
 
-    phrase = PHRASES.get(phrase_id, {})
+    phrase = _get_phrase(phrase_id)
     sender = db.get_user(uid)
     sender_name = _display_name(sender) if sender else "Соперник"
 
@@ -2128,8 +2130,12 @@ def _user_dbg_text(user: dict) -> str:
     achs = db.get_user_achievements(uid)
     titles = db.get_user_cosmetics(uid, "title")
     phrases = db.get_user_cosmetics(uid, "phrase")
-    active = user.get("active_title") or "—"
-    active_label = f"{TITLES[active]['emoji']} {TITLES[active]['label']}" if active in TITLES else active
+    active = user.get("active_title")
+    if active:
+        _t = _get_title(active)
+        active_label = f"{_t.get('emoji','')} {_t.get('label', active)}"
+    else:
+        active_label = "—"
     return (
         f"👤 *{_esc(user['display_name'])}* \\(@{_esc(user.get('username') or '—')}\\)\n"
         f"🆔 ID: `{user['user_id']}`\n"
@@ -2359,21 +2365,28 @@ async def cb_dbg_revoke_ach(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 def _dbg_cosm_text(uid: int, user: dict) -> str:
     owned_titles = db.get_user_cosmetics(uid, "title")
     owned_phrases = db.get_user_cosmetics(uid, "phrase")
-    active = user.get("active_title") or "—"
-    active_label = f"{TITLES[active]['emoji']} {TITLES[active]['label']}" if active in TITLES else active
+    active = user.get("active_title")
+    if active:
+        t_cur = _get_title(active)
+        active_label = f"{t_cur.get('emoji','')} {t_cur.get('label', active)}"
+    else:
+        active_label = "—"
 
     lines = [f"🎨 *Косметика — {_esc(user['display_name'])}*\n"]
     lines.append(f"🏷 Активный титул: *{_esc(active_label)}*\n")
 
     lines.append("*Титулы:*")
-    for tid, t in TITLES.items():
+    for tid in TITLES:
+        cur = _get_title(tid)
         mark = "✅" if tid in owned_titles else "⬜"
-        lines.append(f"  {mark} {t['emoji']} {_esc(t['label'])}")
+        lines.append(f"  {mark} {cur.get('emoji','')} {_esc(cur.get('label',''))}")
 
     lines.append("\n*Фразы:*")
-    for pid_p, p in PHRASES.items():
+    for pid_p in PHRASES:
+        cur = _get_phrase(pid_p)
         mark = "✅" if pid_p in owned_phrases else "⬜"
-        lines.append(f"  {mark} _{_esc(p['text'][:40])}…_")
+        txt = cur.get("text", "")
+        lines.append(f"  {mark} _{_esc(txt[:40])}…_")
 
     return "\n".join(lines)
 
@@ -2422,15 +2435,26 @@ def _dbg_ctitles_kb(uid: int) -> InlineKeyboardMarkup:
     active = db.get_active_title(uid)
     rows = []
     for tid in TITLES:
-        cur = _get_title(tid)   # applies DB overrides
+        cur = _get_title(tid)
         has = tid in owned
         is_active = tid == active
-        mark = "✅🏷" if (has and is_active) else ("✅" if has else "⬜")
-        label = f"{mark} {cur.get('emoji','')} {cur.get('label','')}"
-        cb = f"dbg_ctoggle_{uid}_{tid}"
-        rows.append([InlineKeyboardButton(label, callback_data=cb)])
-    if active:
-        rows.append([InlineKeyboardButton("❌ Снять активный титул", callback_data=f"dbg_ccleart_{uid}")])
+        if has and is_active:
+            # owned + active: one button to deactivate, one to revoke
+            rows.append([
+                InlineKeyboardButton(f"✅🏷 {cur.get('emoji','')} {cur.get('label','')}", callback_data=f"dbg_ccleart_{uid}"),
+                InlineKeyboardButton("🗑", callback_data=f"dbg_ctoggle_{uid}_{tid}"),
+            ])
+        elif has:
+            # owned but not active: activate or revoke
+            rows.append([
+                InlineKeyboardButton(f"✅ {cur.get('emoji','')} {cur.get('label','')}", callback_data=f"dbg_ctactivate_{uid}_{tid}"),
+                InlineKeyboardButton("🗑", callback_data=f"dbg_ctoggle_{uid}_{tid}"),
+            ])
+        else:
+            # not owned: give it
+            rows.append([
+                InlineKeyboardButton(f"⬜ {cur.get('emoji','')} {cur.get('label','')}", callback_data=f"dbg_ctoggle_{uid}_{tid}"),
+            ])
     rows.append([InlineKeyboardButton("← Косметика", callback_data=f"dbg_cosm_{uid}")])
     return InlineKeyboardMarkup(rows)
 
@@ -2444,8 +2468,9 @@ async def cb_dbg_ctitles(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     uid = int(q.data.split("_")[2])
     await q.edit_message_text(
         "🏷 *Управление титулами*\n"
-        "✅ \\= выдан \\| ✅🏷 \\= выдан и активен\n"
-        "_Нажми чтобы выдать/отозвать\\. Для активации — установи через меню косметики игрока_",
+        "✅🏷 \\= активен \\(нажми — снять\\)\n"
+        "✅ \\= выдан \\(нажми — активировать\\) \\| 🗑 \\= отозвать\n"
+        "⬜ \\= не выдан \\(нажми — выдать\\)",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=_dbg_ctitles_kb(uid),
     )
@@ -2475,6 +2500,25 @@ async def cb_dbg_ctoggle(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     await q.edit_message_reply_markup(reply_markup=kb)
 
 
+async def cb_dbg_ctactivate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_ctactivate_{uid}_{title_id} — set title as active for player."""
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    parts = q.data.split("_", 3)  # dbg_ctactivate_{uid}_{title_id}
+    uid = int(parts[2])
+    title_id = parts[3]
+    owned = db.get_user_cosmetics(uid, "title")
+    if title_id not in owned:
+        db.award_cosmetic(uid, "title", title_id)  # give if not owned
+    db.set_active_title(uid, title_id)
+    cur = _get_title(title_id)
+    kb = _dbg_ctitles_kb(uid)
+    await q.answer(f"✅🏷 Активен: {cur.get('emoji','')} {cur.get('label','')}", show_alert=False)
+    await q.edit_message_reply_markup(reply_markup=kb)
+
+
 async def cb_dbg_ccleart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """dbg_ccleart_{uid} — clear active title."""
     q = update.callback_query
@@ -2484,7 +2528,7 @@ async def cb_dbg_ccleart(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     uid = int(q.data.split("_")[2])
     db.set_active_title(uid, None)
     kb = _dbg_ctitles_kb(uid)
-    await q.answer("✅ Активный титул снят", show_alert=False)
+    await q.answer("❌ Активный титул снят", show_alert=False)
     await q.edit_message_reply_markup(reply_markup=kb)
 
 
@@ -3385,6 +3429,7 @@ def create_application() -> Application:
         ("^dbg_cosm_reset_",      cb_dbg_cosm_reset),
         ("^dbg_cosm_",            cb_dbg_cosm),
         ("^dbg_ctitles_",         cb_dbg_ctitles),
+        ("^dbg_ctactivate_",      cb_dbg_ctactivate),
         ("^dbg_ctoggle_",         cb_dbg_ctoggle),
         ("^dbg_ccleart_",         cb_dbg_ccleart),
         ("^dbg_cphrases_",        cb_dbg_cphrases),
@@ -3411,6 +3456,7 @@ def create_application() -> Application:
 
 def main() -> None:
     app = create_application()
+    _reload_cosm_overrides()   # load DB overrides into cache on startup
     logger.info("Bot started. Polling…")
     app.run_polling(drop_pending_updates=True)
 
