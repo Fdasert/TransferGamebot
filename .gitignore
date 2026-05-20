@@ -5,3 +5,6 @@ __pycache__/
 .env
 .env.local
 transfermarkt-api/
+
+.vercel
+.env*.local

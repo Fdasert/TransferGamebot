@@ -585,6 +585,7 @@ async def cb_menu_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
     profile_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏅 Достижения", callback_data="achievements"),
          InlineKeyboardButton("🎨 Косметика", callback_data="cosmetics_menu")],
+        [InlineKeyboardButton("🏟 Зал болельщика", callback_data="fan_hall")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
     await q.edit_message_text(
@@ -628,6 +629,78 @@ async def cb_achievements(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("← Назад", callback_data="menu_profile"),
         ]]),
+    )
+
+
+async def cb_fan_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Зал болельщика — показывает прогресс разблокировки клубов."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    user = db.get_user(uid)
+    counts = db.get_club_guess_counts(uid)  # {club_id: count}
+    allegiance_id = str(user.get("club_allegiance") or "") if user else ""
+
+    # Подтянуть имена клубов одним запросом
+    name_map: dict[str, str] = {}
+    if counts:
+        try:
+            club_ids = list(counts.keys())
+            res = db.get_client().table("clubs").select("club_id, club_name").in_("club_id", club_ids).execute()
+            name_map = {str(r["club_id"]): r["club_name"] for r in (res.data or [])}
+        except Exception:
+            pass
+
+    unlocked = [(cid, cnt) for cid, cnt in counts.items() if cnt >= 5]
+    in_progress = [(cid, cnt) for cid, cnt in counts.items() if cnt < 5]
+    # Сортировка: разблокированные по count desc, прогресс по count desc
+    unlocked.sort(key=lambda x: -x[1])
+    in_progress.sort(key=lambda x: -x[1])
+
+    lines: list[str] = ["<b>🏟 Зал болельщика</b>\n"]
+
+    if allegiance_id:
+        cname = name_map.get(allegiance_id, allegiance_id)
+        emblem = club_emblem_html(allegiance_id)
+        lines.append(f"<b>Твой клуб:</b> {emblem} <b>{cname}</b>\n")
+    else:
+        lines.append("<i>Клуб-фан не выбран</i>\n")
+
+    if unlocked:
+        lines.append(f"<b>✅ Разблокировано ({len(unlocked)}):</b>")
+        for cid, cnt in unlocked:
+            cname = name_map.get(cid, cid)
+            emblem = club_emblem_html(cid)
+            star = " ⭐" if cid == allegiance_id else ""
+            lines.append(f"  {emblem} {cname}{star}")
+        lines.append("")
+
+    if in_progress:
+        lines.append(f"<b>🔓 В процессе ({len(in_progress)}):</b>")
+        for cid, cnt in in_progress[:10]:  # топ-10
+            cname = name_map.get(cid, cid)
+            emblem = club_emblem_html(cid)
+            bar_filled = "█" * cnt + "░" * (5 - cnt)
+            lines.append(f"  {emblem} {cname} — {bar_filled} {cnt}/5")
+        if len(in_progress) > 10:
+            lines.append(f"  <i>…и ещё {len(in_progress) - 10}</i>")
+        lines.append("")
+
+    if not unlocked and not in_progress:
+        lines.append("<i>Ты ещё не угадал ни одного трансфера. Сыграй игру!</i>")
+
+    lines.append("<i>💡 Угадай 5 трансферов из клуба — и сможешь стать его фанатом</i>")
+
+    rows = []
+    if unlocked:
+        rows.append([InlineKeyboardButton("🏟 Выбрать клуб-фан", callback_data="club_allegiance")])
+    rows.append([InlineKeyboardButton("← Профиль", callback_data="menu_profile")])
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
@@ -2453,6 +2526,7 @@ def debug_user_kb(uid: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🏅 Рейтинг",       callback_data=f"dbg_rating_{uid}")],
         [InlineKeyboardButton("🏆 Достижения",    callback_data=f"dbg_achs_{uid}"),
          InlineKeyboardButton("🎨 Косметика",     callback_data=f"dbg_cosm_{uid}")],
+        [InlineKeyboardButton("🏟 Клубы",         callback_data=f"dbg_clubs_{uid}")],
         [InlineKeyboardButton("🔄 Сбросить кал.", callback_data=f"dbg_resetcal_{uid}"),
          InlineKeyboardButton("🗑 Состояние",     callback_data=f"dbg_clearstate_{uid}")],
         [InlineKeyboardButton("← Назад",          callback_data="dbg_back")],
@@ -2595,6 +2669,90 @@ async def cb_dbg_clearstate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     uid = int(q.data.split("_")[2])
     db.clear_pending_action(uid)
     await q.answer("✅ Состояние очищено", show_alert=True)
+
+
+# ── Debug: club allegiance management ─────────────────────────────────────────
+
+# Топ-клубов для быстрой разблокировки в debug-панели
+_DBG_QUICK_CLUBS = [
+    ("281",   "Manchester City"),
+    ("418",   "Real Madrid"),
+    ("131",   "FC Barcelona"),
+    ("27",    "Bayern Munich"),
+    ("46",    "Inter Milan"),
+    ("583",   "Paris Saint-Germain"),
+    ("964",   "Zenit"),
+]
+
+
+def _dbg_clubs_kb(uid: int) -> InlineKeyboardMarkup:
+    unlocked = set(db.get_unlocked_clubs(uid))
+    rows = []
+    for cid, cname in _DBG_QUICK_CLUBS:
+        mark = "✅ " if cid in unlocked else ""
+        rows.append([InlineKeyboardButton(
+            f"{mark}{cname}",
+            callback_data=f"dbg_unlock_{uid}_{cid}",
+        )])
+    rows.append([InlineKeyboardButton("🗑 Сбросить все клубы", callback_data=f"dbg_clubs_reset_{uid}")])
+    rows.append([InlineKeyboardButton("← Назад", callback_data=f"dbg_su_{uid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_dbg_clubs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_clubs_{uid} — show quick club unlock menu."""
+    q = update.callback_query
+    await q.answer()
+    if not _is_superadmin(q.from_user.id):
+        return
+    uid = int(q.data.split("_")[2])
+    target = db.get_user(uid)
+    if not target:
+        await q.answer("Игрок не найден.", show_alert=True)
+        return
+    counts = db.get_club_guess_counts(uid)
+    allegiance = target.get("club_allegiance") or "—"
+    text = (
+        f"🏟 *Клубы игрока* `{uid}`\n\n"
+        f"Активный клуб\\-фан: `{_esc(str(allegiance))}`\n"
+        f"Разблокировано: {len(db.get_unlocked_clubs(uid))}\n"
+        f"Всего отметок: {sum(counts.values())}\n\n"
+        f"_Тапни клуб — установит счётчик в 5 \\(разблокирует\\)_"
+    )
+    await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=_dbg_clubs_kb(uid))
+
+
+async def cb_dbg_unlock_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_unlock_{uid}_{club_id} — set club guess count to 5."""
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    parts = q.data.split("_")
+    uid = int(parts[2])
+    club_id = parts[3]
+    # Топорно: добавляем угадывания пока не достигнем 5
+    current = db.get_club_guess_count(uid, club_id)
+    while current < 5:
+        current = db.increment_club_guess(uid, club_id)
+    await q.answer(f"✅ Клуб {club_id} разблокирован", show_alert=False)
+    # Перерисовка меню
+    q.data = f"dbg_clubs_{uid}"
+    await cb_dbg_clubs(update, ctx)
+
+
+async def cb_dbg_clubs_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """dbg_clubs_reset_{uid} — wipe all club_guess_counts for user."""
+    q = update.callback_query
+    if not _is_superadmin(q.from_user.id):
+        await q.answer()
+        return
+    uid = int(q.data.split("_")[3])
+    db.get_client().table("club_guess_counts").delete().eq("user_id", uid).execute()
+    db.set_club_allegiance(uid, None)
+    await q.answer("🗑 Все клубы сброшены", show_alert=True)
+    q.data = f"dbg_clubs_{uid}"
+    await cb_dbg_clubs(update, ctx)
 
 
 async def _handle_dbg_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE, action: str, data: dict) -> None:
@@ -3767,6 +3925,7 @@ def create_application() -> Application:
         ("^menu_play$",           cb_menu_play),
         ("^menu_profile$",        cb_menu_profile),
         ("^achievements$",        cb_achievements),
+        ("^fan_hall$",            cb_fan_hall),
         ("^cosmetics_menu$",      cb_cosmetics_menu),
         ("^cosmetics_titles$",    cb_cosmetics_titles),
         ("^set_title_",           cb_set_title),
@@ -3822,6 +3981,9 @@ def create_application() -> Application:
         ("^dbg_rating_",          cb_dbg_rating),
         ("^dbg_resetcal_",        cb_dbg_resetcal),
         ("^dbg_clearstate_",      cb_dbg_clearstate),
+        ("^dbg_clubs_reset_",     cb_dbg_clubs_reset),
+        ("^dbg_clubs_",           cb_dbg_clubs),
+        ("^dbg_unlock_",          cb_dbg_unlock_club),
         ("^dbg_achs_",            cb_dbg_achs),
         ("^dbg_gach_",            cb_dbg_give_ach),
         ("^dbg_rach_",            cb_dbg_revoke_ach),
