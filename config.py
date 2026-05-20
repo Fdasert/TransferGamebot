@@ -16,6 +16,11 @@ CUBE_SUPABASE_KEY = os.getenv(
 
 SUPERADMIN_IDS: list[int] = [518544601]
 
+# Webhook (Vercel deployment)
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")          # e.g. https://yourbot.vercel.app
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")  # random secret string
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")                    # protects /api/set_webhook
+
 TRANSFERMARKT_API_URL = os.getenv("TRANSFERMARKT_API_URL", "http://localhost:8000")
 
 # ELO

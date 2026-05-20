@@ -1,0 +1,11 @@
+.venv
+.git
+__pycache__
+*.pyc
+*.pyo
+.env
+*.log
+pack_thumbs/
+pack_full.json
+check_emblems.py
+NOTES.md
