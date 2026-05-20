@@ -17,3 +17,5 @@ primary_region = 'ams'
 [[vm]]
   size = 'shared-cpu-1x'
   memory = '256mb'
+  auto_stop_machines = false
+  min_machines_running = 1
