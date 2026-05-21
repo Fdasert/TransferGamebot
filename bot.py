@@ -744,18 +744,15 @@ async def cb_fan_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             active_mark = " ⭐" if is_active else ""
             if next_th is not None:
                 bar_len = 10
-                # Progress within current level
-                # Find current level's threshold
                 cur_th = next((t for t, *_ in CLUB_LOYALTY_LEVELS if cnt >= t), CLUB_LOYALTY_LEVELS[-1][0])
-                prev_levels = [t for t, *_ in CLUB_LOYALTY_LEVELS if t > cur_th]
-                prev_th = prev_levels[-1] if prev_levels else 0
-                filled = min(bar_len, round((cnt - prev_th) / (next_th - prev_th) * bar_len))
+                denom = next_th - cur_th
+                filled = min(bar_len, round((cnt - cur_th) / denom * bar_len)) if denom > 0 else bar_len
                 bar = "█" * filled + "░" * (bar_len - filled)
                 next_lv_label = next((l for t, l, *_ in CLUB_LOYALTY_LEVELS if t == next_th), "")
                 next_lv_emoji = next((e for t, l, e, *_ in CLUB_LOYALTY_LEVELS if t == next_th), "")
-                progress_str = f" [{bar}] {cnt}/{next_th} → {next_lv_emoji}{next_lv_label}"
+                progress_str = f" [{bar}] {cnt}/{next_th} → {next_lv_emoji} {next_lv_label}"
             else:
-                progress_str = f" [{cnt} угаданных]"
+                progress_str = f" · {cnt} угаданных 🏆"
             lines.append(f"  {emblem} <b>{_hesc(cname)}</b>{badge}{active_mark}{progress_str}")
         lines.append("")
 
