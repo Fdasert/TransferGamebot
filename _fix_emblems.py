@@ -32,8 +32,8 @@ CLUBS = [
     ("703",   45, "Nottingham Forest"),
     ("989",   46, "AFC Bournemouth"),
     ("543",   47, "Wolverhampton Wanderers"),
-    ("677",   48, "Ipswich Town"),  # placeholder — verify
-    ("180",   49, "Southampton FC"),  # placeholder — verify
+    ("180",   48, "Southampton FC"),
+    ("677",   49, "Ipswich Town"),
     # Luton Town dropped (no slot in pack)
 
     # ── Spain (055-074): trophies at 050-054, clubs start at 055 ──────────
@@ -131,8 +131,7 @@ CLUBS = [
     ("121",   172, "Dynamo Moscow"),
     ("16704", 173, "FC Krasnodar"),
     ("3725",  174, "Akhmat Grozny"),
-    ("2696",  175, "Krylya Sovetov"),  # last slot in Russia section
-    # FC Rostov dropped (no slot)
+    ("1083",  175, "FC Rostov"),
 ]
 
 print("Generating new CLUB_EMBLEMS...\n")
