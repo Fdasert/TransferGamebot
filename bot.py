@@ -154,8 +154,23 @@ ACHIEVEMENTS: dict[str, dict] = {
         "desc": "Накопить 100,000 монет",
         "reward": 0, "secret": True,
     },
+    # ── 🏟 Преданность клубу ─────────────────────────────────────────────
+    "club_fan_25": {
+        "emoji": "🏆", "name": "Преданный фанат",
+        "desc": "Угадать 25 трансферов из одного клуба",
+        "reward": 5_000, "secret": False,
+    },
 }
 
+
+# ── Club loyalty levels ───────────────────────────────────────────────────────
+# (min_guesses, display_label, emoji, fan_bonus_coins)
+CLUB_LOYALTY_LEVELS: list[tuple[int, str, str, int]] = [
+    (50, "Легенда",   "🏆", 50),
+    (30, "Ультрас",   "🔥", 30),
+    (15, "Фанат",     "⭐", 20),
+    (5,  "Болельщик", "💚", 15),
+]
 
 # ── Difficulty settings ───────────────────────────────────────────────────────
 
@@ -394,30 +409,52 @@ def rating_display(user: dict) -> str:
     return str(user["rating"])
 
 
-def profile_text(user: dict) -> str:
-    gp = user.get("games_played", 0)
-    wins = user.get("wins", 0)
+def profile_text(user: dict, club_count: int = 0) -> str:
+    """Returns HTML-formatted profile string."""
+    gp     = user.get("games_played", 0)
+    wins   = user.get("wins", 0)
     losses = user.get("losses", 0)
-    coins = user.get("coins", 0)
-    wr = f"{wins/gp*100:.0f}%" if gp else "—"
-    titles = db.get_user_cosmetics(user["user_id"], "title")
+    coins  = user.get("coins", 0)
+    wr     = f"{wins/gp*100:.0f}%" if gp else "—"
+
+    titles  = db.get_user_cosmetics(user["user_id"], "title")
     phrases = db.get_user_cosmetics(user["user_id"], "phrase")
-    cosmetics_line = f"\n🎨 Косметика: {len(titles)} титул\\(ов\\) · {len(phrases)} фраз\\(ы\\)" if (titles or phrases) else ""
-    # Club allegiance line
-    allegiance_id = str(user.get("club_allegiance") or "")
+    cosmetics_line = (
+        f"\n🎨 Косметика: {len(titles)} титул(ов) · {len(phrases)} фраз(ы)"
+        if (titles or phrases) else ""
+    )
+
+    allegiance_id  = str(user.get("club_allegiance") or "")
     allegiance_line = ""
+    banner_line     = ""
+
     if allegiance_id:
         try:
-            clubs_res = db.get_client().table("clubs").select("club_name").eq("club_id", allegiance_id).execute()
+            clubs_res = (
+                db.get_client().table("clubs")
+                .select("club_name").eq("club_id", allegiance_id).execute()
+            )
             cname = clubs_res.data[0]["club_name"] if clubs_res.data else allegiance_id
         except Exception:
             cname = allegiance_id
-        allegiance_line = f"\n🏟 Клуб\\-фан: *{_esc(cname)}*"
+
+        level_label, level_emoji, fan_bonus, _ = _club_loyalty(club_count)
+        emblem = club_emblem_html(allegiance_id, "🏟")
+        badge  = f" {level_emoji} <b>{_hesc(level_label)}</b>" if level_label else ""
+        bonus_hint = f" <i>(+{fan_bonus} монет за угадывание)</i>" if fan_bonus else ""
+        allegiance_line = (
+            f"\n🏟 Клуб-фан: {emblem} <b>{_hesc(cname)}</b>{badge}{bonus_hint}"
+        )
+        # Баннер — только для Легенды (50+ угаданных)
+        if club_count >= CLUB_LOYALTY_LEVELS[0][0]:
+            banner_line = f"🏆 ══ {emblem} <b>{_hesc(cname.upper())}</b> ══ 🏆\n\n"
+
     return (
-        f"👤 *{_esc(_display_name(user))}*\n"
-        f"🏅 Рейтинг: *{_esc(rating_display(user))}*\n"
-        f"🪙 Монеты: *{coins}*\n"
-        f"🎮 Игр: {gp} \\| ✅ Побед: {wins} \\| ❌ Поражений: {losses}\n"
+        f"{banner_line}"
+        f"👤 <b>{_hesc(_display_name(user))}</b>\n"
+        f"🏅 Рейтинг: <b>{_hesc(rating_display(user))}</b>\n"
+        f"🪙 Монеты: <b>{coins}</b>\n"
+        f"🎮 Игр: {gp} | ✅ Побед: {wins} | ❌ Поражений: {losses}\n"
         f"📊 Винрейт: {wr}"
         f"{cosmetics_line}"
         f"{allegiance_line}"
@@ -429,6 +466,24 @@ def _esc(text: str) -> str:
     for ch in r"\_*[]()~`>#+-=|{}.!":
         text = text.replace(ch, f"\\{ch}")
     return text
+
+
+def _hesc(text: str) -> str:
+    """HTML-escape for messages using ParseMode.HTML."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _club_loyalty(count: int) -> tuple[str, str, int, int | None]:
+    """
+    Return (label, emoji, fan_bonus_coins, next_threshold_or_None).
+    next_threshold is None if already at max level.
+    """
+    for i, (threshold, label, emoji, bonus) in enumerate(CLUB_LOYALTY_LEVELS):
+        if count >= threshold:
+            next_th = CLUB_LOYALTY_LEVELS[i - 1][0] if i > 0 else None
+            return label, emoji, bonus, next_th
+    # Below first level — return next threshold to show progress toward it
+    return "", "", 0, CLUB_LOYALTY_LEVELS[-1][0]
 
 
 _cosm_overrides_cache: dict[str, dict] = {}
@@ -578,10 +633,13 @@ async def cb_menu_play(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cb_menu_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    user = db.get_user(q.from_user.id)
+    uid  = q.from_user.id
+    user = db.get_user(uid)
     if not user:
         await q.edit_message_text("Сначала зарегистрируйся через /start")
         return
+    allegiance_id = str(user.get("club_allegiance") or "")
+    club_count = db.get_club_guess_count(uid, allegiance_id) if allegiance_id else 0
     profile_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🏅 Достижения", callback_data="achievements"),
          InlineKeyboardButton("🎨 Косметика", callback_data="cosmetics_menu")],
@@ -589,8 +647,8 @@ async def cb_menu_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
     await q.edit_message_text(
-        profile_text(user),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        profile_text(user, club_count),
+        parse_mode=ParseMode.HTML,
         reply_markup=profile_kb,
     )
 
@@ -610,6 +668,7 @@ async def cb_achievements(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         ("🎯 Угадывание трансферов", ["first_exact", "silent_exact", "hattrick", "perfect_game", "no_hints_win", "exact_10", "exact_50", "exact_100"]),
         ("🏆 Соревновательные", ["first_win", "calibrated", "win_streak_3", "win_streak_5", "rating_1000", "rating_1500", "games_10", "games_50"]),
         ("⚽ FUT Клуб", ["first_pack", "got_97", "rich_100k"]),
+        ("🏟 Преданность клубу", ["club_fan_25"]),
     ]
 
     for cat_name, ach_ids in categories:
@@ -663,7 +722,14 @@ async def cb_fan_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if allegiance_id:
         cname = name_map.get(allegiance_id, allegiance_id)
         emblem = club_emblem_html(allegiance_id)
-        lines.append(f"<b>Твой клуб:</b> {emblem} <b>{cname}</b>\n")
+        al_cnt = counts.get(allegiance_id, 0)
+        lv_label, lv_emoji, fan_bonus, next_th = _club_loyalty(al_cnt)
+        badge = f" {lv_emoji} <b>{lv_label}</b>" if lv_label else ""
+        bonus_str = f" · +{fan_bonus} монет за угадывание" if fan_bonus else ""
+        lines.append(f"<b>Твой клуб:</b> {emblem} <b>{_hesc(cname)}</b>{badge}{bonus_str}\n")
+        if next_th is not None:
+            left = next_th - al_cnt
+            lines.append(f"<i>До следующего уровня: ещё {left} угаданных</i>\n")
     else:
         lines.append("<i>Клуб-фан не выбран</i>\n")
 
@@ -672,17 +738,34 @@ async def cb_fan_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for cid, cnt in unlocked:
             cname = name_map.get(cid, cid)
             emblem = club_emblem_html(cid)
-            star = " ⭐" if cid == allegiance_id else ""
-            lines.append(f"  {emblem} {cname}{star}")
+            lv_label, lv_emoji, fan_bonus, next_th = _club_loyalty(cnt)
+            badge = f" {lv_emoji} {lv_label}" if lv_label else ""
+            is_active = cid == allegiance_id
+            active_mark = " ⭐" if is_active else ""
+            if next_th is not None:
+                bar_len = 10
+                # Progress within current level
+                # Find current level's threshold
+                cur_th = next((t for t, *_ in CLUB_LOYALTY_LEVELS if cnt >= t), CLUB_LOYALTY_LEVELS[-1][0])
+                prev_levels = [t for t, *_ in CLUB_LOYALTY_LEVELS if t > cur_th]
+                prev_th = prev_levels[-1] if prev_levels else 0
+                filled = min(bar_len, round((cnt - prev_th) / (next_th - prev_th) * bar_len))
+                bar = "█" * filled + "░" * (bar_len - filled)
+                next_lv_label = next((l for t, l, *_ in CLUB_LOYALTY_LEVELS if t == next_th), "")
+                next_lv_emoji = next((e for t, l, e, *_ in CLUB_LOYALTY_LEVELS if t == next_th), "")
+                progress_str = f" [{bar}] {cnt}/{next_th} → {next_lv_emoji}{next_lv_label}"
+            else:
+                progress_str = f" [{cnt} угаданных]"
+            lines.append(f"  {emblem} <b>{_hesc(cname)}</b>{badge}{active_mark}{progress_str}")
         lines.append("")
 
     if in_progress:
         lines.append(f"<b>🔓 В процессе ({len(in_progress)}):</b>")
-        for cid, cnt in in_progress[:10]:  # топ-10
+        for cid, cnt in in_progress[:10]:
             cname = name_map.get(cid, cid)
             emblem = club_emblem_html(cid)
             bar_filled = "█" * cnt + "░" * (5 - cnt)
-            lines.append(f"  {emblem} {cname} — {bar_filled} {cnt}/5")
+            lines.append(f"  {emblem} {_hesc(cname)} — {bar_filled} {cnt}/5")
         if len(in_progress) > 10:
             lines.append(f"  <i>…и ещё {len(in_progress) - 10}</i>")
         lines.append("")
@@ -690,7 +773,9 @@ async def cb_fan_hall(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not unlocked and not in_progress:
         lines.append("<i>Ты ещё не угадал ни одного трансфера. Сыграй игру!</i>")
 
-    lines.append("<i>💡 Угадай 5 трансферов из клуба — и сможешь стать его фанатом</i>")
+    lines.append(
+        "<i>💡 Уровни: 💚 Болельщик (5) → ⭐ Фанат (15) → 🔥 Ультрас (30) → 🏆 Легенда (50)</i>"
+    )
 
     rows = []
     if unlocked:
@@ -1758,29 +1843,63 @@ async def _handle_guess(
         if t_club_id:
             new_count = db.increment_club_guess(user_id, t_club_id)
 
-            # Notify on unlock milestone
+            # Notify on unlock milestones
+            clubs_res = db.get_client().table("clubs").select("club_name").eq("club_id", t_club_id).execute()
+            _cname_club = clubs_res.data[0]["club_name"] if clubs_res.data else t_club_id
+            emblem = club_emblem_html(t_club_id) if has_emblem(t_club_id) else "🏟"
+            _, lv_emoji, _, _ = _club_loyalty(new_count)
+
             if new_count == 5:
-                clubs = db.get_client().table("clubs").select("club_name").eq("club_id", t_club_id).execute()
-                cname = clubs.data[0]["club_name"] if clubs.data else t_club_id
-                emblem = club_emblem_html(t_club_id) if has_emblem(t_club_id) else "🏟"
                 try:
                     await ctx.bot.send_message(
                         user_id,
                         f"🔓 <b>Клуб разблокирован!</b>\n\n"
-                        f"{emblem} <b>{cname}</b>\n\n"
+                        f"{emblem} <b>{_hesc(_cname_club)}</b>\n\n"
                         f"Ты угадал 5 трансферов этого клуба — теперь можешь стать его фанатом!\n"
-                        f"<i>Профиль → Косметика → Клубная эмблема</i>",
+                        f"<i>Профиль → Зал болельщика → Выбрать клуб-фан</i>",
                         parse_mode="HTML",
                     )
                 except TelegramError:
                     pass
 
-            # Fan bonus: +15 монет если это клуб-аллегiance игрока
+            elif new_count in (15, 30, 50):
+                lv_label, lv_emoji2, new_bonus, _ = _club_loyalty(new_count)
+                try:
+                    await ctx.bot.send_message(
+                        user_id,
+                        f"{lv_emoji2} <b>Новый уровень преданности!</b>\n\n"
+                        f"{emblem} <b>{_hesc(_cname_club)}</b>\n"
+                        f"Уровень: {lv_emoji2} <b>{_hesc(lv_label)}</b>\n\n"
+                        f"Бонус за угадывание из этого клуба: <b>+{new_bonus} монет</b>",
+                        parse_mode="HTML",
+                    )
+                except TelegramError:
+                    pass
+
+            # Achievement: Преданный фанат (25 угаданных из одного клуба)
+            if new_count == 25:
+                if "club_fan_25" not in db.get_user_achievements(user_id):
+                    db.add_user_achievement(user_id, "club_fan_25")
+                    ach = ACHIEVEMENTS["club_fan_25"]
+                    if ach.get("reward"):
+                        db.add_coins(user_id, ach["reward"])
+                    try:
+                        await ctx.bot.send_message(
+                            user_id,
+                            f"🏆 <b>Достижение разблокировано!</b>\n\n"
+                            f"{ach['emoji']} <b>{_hesc(ach['name'])}</b>\n"
+                            f"<i>{_hesc(ach['desc'])}</i>\n\n"
+                            f"💰 +{ach['reward']:,} монет!",
+                            parse_mode="HTML",
+                        )
+                    except TelegramError:
+                        pass
+
+            # Fan bonus: динамический на основе уровня преданности
             guesser_user = db.get_user(user_id)
             if guesser_user and str(guesser_user.get("club_allegiance") or "") == t_club_id:
-                fan_bonus_coins = 15
-                clubs = db.get_client().table("clubs").select("club_name").eq("club_id", t_club_id).execute()
-                fan_bonus_club_name = clubs.data[0]["club_name"] if clubs.data else t_club_id
+                _, _, fan_bonus_coins, _ = _club_loyalty(new_count)
+                fan_bonus_club_name = _cname_club
 
     # Update round in DB
     round_row = db.get_round(game_id, round_num)
