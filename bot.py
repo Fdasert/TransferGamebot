@@ -1470,12 +1470,16 @@ async def _start_game(
         "game_id": game_id,
         "round_num": 1,
         "opponent_id": second_id,
+        "ultras_range_used": False,
+        "legend_sc_used": False,
     })
     await set_state(second_id, "waiting_for_pick", {
         "game_id": game_id,
         "round_num": 1,
         "picker_id": first_id,
         "opponent_id": first_id,
+        "ultras_range_used": False,
+        "legend_sc_used": False,
     })
 
     # Notify picker
@@ -1609,12 +1613,19 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if round_row:
         db.update_round(round_row["id"], transfer_id=transfer_id)
 
-    # Switch picker to waiting
+    # Switch picker to waiting (carry their ability flags from picking state)
     await set_state(user_id, "waiting_for_guess", {
         "game_id": game_id,
         "round_num": round_num,
         "opponent_id": opponent_id,
+        "ultras_range_used": data.get("ultras_range_used", False),
+        "legend_sc_used": data.get("legend_sc_used", False),
     })
+
+    # Carry guesser's ability flags from their waiting_for_pick state
+    _, guesser_wait_data = await get_state(opponent_id)
+    guesser_ultras_used = (guesser_wait_data or {}).get("ultras_range_used", False)
+    guesser_sc_used = (guesser_wait_data or {}).get("legend_sc_used", False)
 
     # Send guesser their task
     await set_state(opponent_id, "guessing", {
@@ -1626,6 +1637,9 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         "hints_used": 0,
         "used_hint_types": [],
         "picker_id": user_id,
+        "transfer_club_id": str(transfer.get("club_id", "") or ""),
+        "ultras_range_used": guesser_ultras_used,
+        "legend_sc_used": guesser_sc_used,
     })
 
     picker = db.get_user(user_id)
@@ -1650,7 +1664,14 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     p1_score = game["player1_score"]
     p2_score = game["player2_score"]
 
-    await _send_guess_prompt(ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name, picker_id=user_id, game_id=game_id)
+    guesser_user_obj = db.get_user(opponent_id)
+    await _send_guess_prompt(
+        ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name,
+        picker_id=user_id, game_id=game_id,
+        transfer_club_id=str(transfer.get("club_id", "") or ""),
+        guesser_user=guesser_user_obj,
+        ultras_range_used=guesser_ultras_used,
+    )
 
 
 async def _send_guess_prompt(
@@ -1665,6 +1686,9 @@ async def _send_guess_prompt(
     picker_name: str,
     picker_id: int | None = None,
     game_id: int | None = None,
+    transfer_club_id: str = "",
+    guesser_user: dict | None = None,
+    ultras_range_used: bool = False,
 ) -> None:
     hint_lines = _build_hint_lines(transfer, used_hint_types)
     can_hint = hints_used < MAX_HINTS
@@ -1683,6 +1707,19 @@ async def _send_guess_prompt(
     )
 
     kb_rows = []
+
+    # Ультрас ability: show range button if eligible
+    if (
+        not ultras_range_used
+        and transfer_club_id
+        and guesser_user
+        and str(guesser_user.get("club_allegiance") or "") == transfer_club_id
+    ):
+        fan_count = db.get_club_guess_count(guesser_id, transfer_club_id)
+        lv_label, _, _, _ = _club_loyalty(fan_count)
+        if lv_label in ("Ультрас", "Легенда"):
+            kb_rows.append([InlineKeyboardButton("🔥 Диапазон цены", callback_data="ultras_range")])
+
     if can_hint:
         available = [h for h in HINT_TYPES if h not in used_hint_types]
         for h in available:
@@ -1716,6 +1753,53 @@ def _build_hint_lines(transfer: dict, used_hint_types: list[str]) -> list[str]:
         if val:
             lines.append(f"{label}: *{_esc(str(val))}*")
     return lines
+
+
+# ── Ultras range ability callback ─────────────────────────────────────────────
+
+async def cb_ultras_range(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    user_id = q.from_user.id
+    action, data = await get_state(user_id)
+
+    if action != "guessing":
+        await q.answer("Сейчас не твоя очередь угадывать.", show_alert=True)
+        return
+
+    if data.get("ultras_range_used"):
+        await q.answer("Способность уже использована в этой игре.", show_alert=True)
+        return
+
+    transfer_club_id = data.get("transfer_club_id", "")
+    guesser_user = db.get_user(user_id)
+    if not (
+        transfer_club_id
+        and guesser_user
+        and str(guesser_user.get("club_allegiance") or "") == transfer_club_id
+    ):
+        await q.answer("Эта способность доступна только для трансферов твоего клуба.", show_alert=True)
+        return
+
+    fan_count = db.get_club_guess_count(user_id, transfer_club_id)
+    lv_label, _, _, _ = _club_loyalty(fan_count)
+    if lv_label not in ("Ультрас", "Легенда"):
+        await q.answer("Недостаточный уровень преданности.", show_alert=True)
+        return
+
+    actual_fee = data["actual_fee"]
+    lo = int(actual_fee * 0.75)
+    hi = int(actual_fee * 1.25)
+
+    data["ultras_range_used"] = True
+    await set_state(user_id, "guessing", data)
+
+    await q.answer()
+    await ctx.bot.send_message(
+        user_id,
+        f"🔥 <b>Инсайд Ультраса</b>\n\n"
+        f"Трансфер в диапазоне: <b>{format_fee(lo)} — {format_fee(hi)}</b>",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 # ── Hint callback ─────────────────────────────────────────────────────────────
@@ -1820,6 +1904,79 @@ async def _handle_registration(update: Update, text: str) -> None:
 
 # ── Guess handler ─────────────────────────────────────────────────────────────
 
+async def _advance_round(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    *,
+    game_id: int,
+    round_num: int,
+    new_picker_id: int,
+    new_guesser_id: int,
+    p1_id: int,
+    p2_id: int,
+    p1_score: int,
+    p2_score: int,
+    guesser_id: int,
+    picker_id: int,
+    guesser_data: dict,
+    picker_action: str,
+    picker_data: dict,
+) -> None:
+    """Advance to next round or finish game. Called after a round is fully resolved."""
+    next_round = round_num + 1
+    if next_round > TOTAL_ROUNDS:
+        await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
+        return
+
+    db.create_round(game_id, next_round, new_picker_id, new_guesser_id)
+    db.update_game(game_id, current_round=next_round)
+
+    # Carry ability flags:
+    # new_picker (was guesser) — use their guessing data flags
+    new_picker_ultras_used = guesser_data.get("ultras_range_used", False)
+    new_picker_sc_used = guesser_data.get("legend_sc_used", False)
+
+    # new_guesser (was picker) — use their picking_league data flags
+    new_guesser_ultras_used = picker_data.get("ultras_range_used", False)
+    new_guesser_sc_used = picker_data.get("legend_sc_used", False)
+
+    await set_state(new_picker_id, "picking_league", {
+        "game_id": game_id,
+        "round_num": next_round,
+        "opponent_id": new_guesser_id,
+        "ultras_range_used": new_picker_ultras_used,
+        "legend_sc_used": new_picker_sc_used,
+    })
+    await set_state(new_guesser_id, "waiting_for_pick", {
+        "game_id": game_id,
+        "round_num": next_round,
+        "picker_id": new_picker_id,
+        "opponent_id": new_picker_id,
+        "ultras_range_used": new_guesser_ultras_used,
+        "legend_sc_used": new_guesser_sc_used,
+    })
+
+    my_score_picker = p1_score if new_picker_id == p1_id else p2_score
+    opp_score_picker = p2_score if new_picker_id == p1_id else p1_score
+
+    await ctx.bot.send_message(
+        new_picker_id,
+        f"📊 Счёт: *{my_score_picker}* — *{opp_score_picker}*\n\n"
+        f"Раунд *{next_round}/{TOTAL_ROUNDS}* — твой ход\\. Выбери лигу:",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=leagues_kb(game_id=game_id),
+    )
+
+    my_score_guesser = p1_score if new_guesser_id == p1_id else p2_score
+    opp_score_guesser = p2_score if new_guesser_id == p1_id else p1_score
+    await ctx.bot.send_message(
+        new_guesser_id,
+        f"📊 Счёт: *{my_score_guesser}* — *{opp_score_guesser}*\n\n"
+        f"Раунд *{next_round}/{TOTAL_ROUNDS}* — соперник выбирает трансфер\\.\\.\\.",
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
+    )
+
+
 async def _handle_guess(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -1843,6 +2000,103 @@ async def _handle_guess(
     transfer_id = data["transfer_id"]
     picker_id = data["picker_id"]
     player_name = data["player_name"]
+
+    # ── Second-chance (Легенда) second guess path ────────────────────────────
+    if data.get("sc_pending"):
+        tier2, points2 = calculate_points(guess, actual_fee, hints_used)
+        sc_first = data.get("sc_first_data", {})
+        points1 = sc_first.get("points", 0)
+        tier1 = sc_first.get("tier", "miss")
+
+        # Use the better result
+        if points2 >= points1:
+            tier, points = tier2, points2
+            winning_guess = guess
+        else:
+            tier, points = tier1, points1
+            winning_guess = sc_first.get("guess", guess)
+
+        effect = tier_effect(tier, points)
+        await update.message.reply_text(
+            f"{effect}\n\n"
+            f"👤 *{_esc(player_name)}*\n"
+            f"✅ Правильная цена: *{_esc(format_fee(actual_fee))}*\n"
+            f"🎯 Лучший ответ: *{_esc(format_fee(winning_guess))}*\n"
+            f"_Второй шанс использован_",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+        # Mark sc used, clear sc_pending
+        data["sc_pending"] = False
+        data["legend_sc_used"] = True
+
+        # Update round in DB
+        round_row = db.get_round(game_id, round_num)
+        if round_row:
+            dev = abs(winning_guess - actual_fee) / actual_fee * 100 if actual_fee else 0
+            db.update_round(
+                round_row["id"],
+                guess_amount=winning_guess,
+                accuracy_percent=round(dev, 2),
+                accuracy_tier=tier,
+                points_earned=points,
+                hints_used=hints_used,
+                hint_types=used_hint_types,
+                completed=True,
+            )
+
+        # Update game scores
+        game = db.get_game(game_id)
+        p1_id = game["player1_id"]
+        p2_id = game["player2_id"]
+        p1_score = game["player1_score"]
+        p2_score = game["player2_score"]
+        if user_id == p1_id:
+            p1_score += points
+        else:
+            p2_score += points
+        db.update_game(game_id, player1_score=p1_score, player2_score=p2_score)
+
+        # Notify picker of result
+        try:
+            await ctx.bot.send_message(
+                picker_id,
+                f"{effect}\n\n"
+                f"👤 *{_esc(player_name)}*\n"
+                f"✅ Правильная цена: *{_esc(format_fee(actual_fee))}*\n"
+                f"🎯 Ответ соперника: *{_esc(format_fee(winning_guess))}*\n"
+                f"_Соперник использовал Второй шанс_",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        except TelegramError:
+            pass
+
+        # Get picker's state data for flag carry
+        picker_action_now, picker_data_now = await get_state(picker_id)
+
+        await clear_state(user_id)
+
+        next_round = round_num + 1
+        if next_round > TOTAL_ROUNDS:
+            await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
+        else:
+            await _advance_round(
+                ctx,
+                game_id=game_id,
+                round_num=round_num,
+                new_picker_id=user_id,
+                new_guesser_id=picker_id,
+                p1_id=p1_id,
+                p2_id=p2_id,
+                p1_score=p1_score,
+                p2_score=p2_score,
+                guesser_id=user_id,
+                picker_id=picker_id,
+                guesser_data=data,
+                picker_action=picker_action_now or "",
+                picker_data=picker_data_now or {},
+            )
+        return
 
     tier, points = calculate_points(guess, actual_fee, hints_used)
 
@@ -1913,6 +2167,63 @@ async def _handle_guess(
                 _, _, fan_bonus_coins, _ = _club_loyalty(new_count)
                 fan_bonus_club_name = _cname_club
 
+    # ── Легенда second-chance check (before writing round to DB) ─────────────
+    transfer_club_id = data.get("transfer_club_id", "")
+    legend_sc_used = data.get("legend_sc_used", False)
+    sc_eligible = False
+    if not legend_sc_used and tier != "exact" and transfer_club_id:
+        guesser_user_sc = db.get_user(user_id)
+        if guesser_user_sc and str(guesser_user_sc.get("club_allegiance") or "") == transfer_club_id:
+            fan_count_sc = db.get_club_guess_count(user_id, transfer_club_id)
+            lv_label_sc, _, _, _ = _club_loyalty(fan_count_sc)
+            if lv_label_sc == "Легенда":
+                sc_eligible = True
+
+    if sc_eligible:
+        # Send picker normal result (with price)
+        effect = tier_effect(tier, points)
+        dev_pct = abs(guess - actual_fee) / actual_fee * 100 if actual_fee else 0
+        try:
+            await ctx.bot.send_message(
+                picker_id,
+                f"{effect}\n\n"
+                f"👤 *{_esc(player_name)}*\n"
+                f"✅ Правильная цена: *{_esc(format_fee(actual_fee))}*\n"
+                f"🎯 Ответ соперника: *{_esc(format_fee(guess))}*\n"
+                f"_Соперник запросил Второй шанс_",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        except TelegramError:
+            pass
+
+        # Save sc_pending state (don't clear, don't write round to DB yet)
+        data["sc_pending"] = True
+        data["sc_first_data"] = {
+            "tier": tier,
+            "points": points,
+            "guess": guess,
+            "hints_used": hints_used,
+            "used_hint_types": used_hint_types,
+        }
+        await set_state(user_id, "guessing", data)
+
+        # Send guesser a blind result + choice buttons
+        sc_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 Второй шанс", callback_data="sc_use")],
+            [InlineKeyboardButton("👁 Показать ответ", callback_data="sc_skip")],
+        ])
+        await update.message.reply_text(
+            f"{effect}\n\n"
+            f"👤 *{_esc(player_name)}*\n"
+            f"🎯 Твой ответ: *{_esc(format_fee(guess))}*\n"
+            f"❌ Ошибка: ~{dev_pct:.0f}%\n"
+            f"💰 Правильная цена: _скрыта_\n\n"
+            f"🏆 *Легенда* — у тебя есть второй шанс\\!",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=sc_kb,
+        )
+        return  # Round advancement happens after second chance is resolved
+
     # Update round in DB
     round_row = db.get_round(game_id, round_num)
     if round_row:
@@ -1978,6 +2289,9 @@ async def _handle_guess(
     except TelegramError:
         pass
 
+    # Get picker's state data for flag carry
+    picker_action_now, picker_data_now = await get_state(picker_id)
+
     await clear_state(user_id)
 
     # Advance to next round or finish
@@ -1985,45 +2299,134 @@ async def _handle_guess(
     if next_round > TOTAL_ROUNDS:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
     else:
-        # Swap roles: who was guesser becomes picker
-        new_picker_id = user_id
-        new_guesser_id = picker_id
-
-        db.create_round(game_id, next_round, new_picker_id, new_guesser_id)
-        db.update_game(game_id, current_round=next_round)
-
-        await set_state(new_picker_id, "picking_league", {
-            "game_id": game_id,
-            "round_num": next_round,
-            "opponent_id": new_guesser_id,
-        })
-        await set_state(new_guesser_id, "waiting_for_pick", {
-            "game_id": game_id,
-            "round_num": next_round,
-            "picker_id": new_picker_id,
-            "opponent_id": new_picker_id,
-        })
-
-        # Determine guesser's score to show progress
-        my_score = p1_score if user_id == p1_id else p2_score
-        opp_score = p2_score if user_id == p1_id else p1_score
-
-        await ctx.bot.send_message(
-            new_picker_id,
-            f"📊 Счёт: *{my_score}* — *{opp_score}*\n\n"
-            f"Раунд *{next_round}/{TOTAL_ROUNDS}* — твой ход\\. Выбери лигу:",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=leagues_kb(game_id=game_id),
+        await _advance_round(
+            ctx,
+            game_id=game_id,
+            round_num=round_num,
+            new_picker_id=user_id,
+            new_guesser_id=picker_id,
+            p1_id=p1_id,
+            p2_id=p2_id,
+            p1_score=p1_score,
+            p2_score=p2_score,
+            guesser_id=user_id,
+            picker_id=picker_id,
+            guesser_data=data,
+            picker_action=picker_action_now or "",
+            picker_data=picker_data_now or {},
         )
 
-        opp_score2 = p1_score if new_guesser_id == p1_id else p2_score
-        my_score2 = p2_score if new_guesser_id == p1_id else p1_score
-        await ctx.bot.send_message(
-            new_guesser_id,
-            f"📊 Счёт: *{my_score2}* — *{opp_score2}*\n\n"
-            f"Раунд *{next_round}/{TOTAL_ROUNDS}* — соперник выбирает трансфер\\.\\.\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
+
+# ── Second-chance callbacks (Легенда ability) ─────────────────────────────────
+
+async def cb_sc_use(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guesser chose to use the second chance — prompt for new guess."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    action, data = await get_state(user_id)
+
+    if action != "guessing" or not data.get("sc_pending"):
+        await q.answer("Второй шанс недоступен.", show_alert=True)
+        return
+
+    await q.answer()
+    await q.edit_message_reply_markup(reply_markup=None)
+    await ctx.bot.send_message(
+        user_id,
+        "🎯 Введи новую сумму трансфера \\(в евро\\)\\:\n_Например: 45M, 45000000, 500K_",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+async def cb_sc_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guesser chose to skip second chance — reveal price and advance round."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    action, data = await get_state(user_id)
+
+    if action != "guessing" or not data.get("sc_pending"):
+        await q.answer("Второй шанс недоступен.", show_alert=True)
+        return
+
+    await q.answer()
+    await q.edit_message_reply_markup(reply_markup=None)
+
+    actual_fee = data["actual_fee"]
+    hints_used = data.get("hints_used", 0)
+    used_hint_types = data.get("used_hint_types", [])
+    game_id = data["game_id"]
+    round_num = data["round_num"]
+    picker_id = data["picker_id"]
+    player_name = data["player_name"]
+
+    sc_first = data.get("sc_first_data", {})
+    tier = sc_first.get("tier", "miss")
+    points = sc_first.get("points", 0)
+    guess = sc_first.get("guess", 0)
+    effect = tier_effect(tier, points)
+
+    # Update round in DB
+    round_row = db.get_round(game_id, round_num)
+    if round_row:
+        dev = abs(guess - actual_fee) / actual_fee * 100 if actual_fee else 0
+        db.update_round(
+            round_row["id"],
+            guess_amount=guess,
+            accuracy_percent=round(dev, 2),
+            accuracy_tier=tier,
+            points_earned=points,
+            hints_used=hints_used,
+            hint_types=used_hint_types,
+            completed=True,
+        )
+
+    # Update game scores
+    game = db.get_game(game_id)
+    p1_id = game["player1_id"]
+    p2_id = game["player2_id"]
+    p1_score = game["player1_score"]
+    p2_score = game["player2_score"]
+    if user_id == p1_id:
+        p1_score += points
+    else:
+        p2_score += points
+    db.update_game(game_id, player1_score=p1_score, player2_score=p2_score)
+
+    # Reveal price to guesser
+    await ctx.bot.send_message(
+        user_id,
+        f"{effect}\n\n"
+        f"👤 *{_esc(player_name)}*\n"
+        f"✅ Правильная цена: *{_esc(format_fee(actual_fee))}*\n"
+        f"🎯 Твой ответ: *{_esc(format_fee(guess))}*",
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+    # Get picker's state data for flag carry
+    picker_action_now, picker_data_now = await get_state(picker_id)
+
+    await clear_state(user_id)
+
+    # Advance to next round or finish
+    next_round = round_num + 1
+    if next_round > TOTAL_ROUNDS:
+        await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
+    else:
+        await _advance_round(
+            ctx,
+            game_id=game_id,
+            round_num=round_num,
+            new_picker_id=user_id,
+            new_guesser_id=picker_id,
+            p1_id=p1_id,
+            p2_id=p2_id,
+            p1_score=p1_score,
+            p2_score=p2_score,
+            guesser_id=user_id,
+            picker_id=picker_id,
+            guesser_data=data,
+            picker_action=picker_action_now or "",
+            picker_data=picker_data_now or {},
         )
 
 
@@ -4093,6 +4496,9 @@ def create_application() -> Application:
         ("^gc_",                  cb_pick_club),
         ("^gt_",                  cb_pick_transfer),
         ("^gh_",                  cb_hint),
+        ("^ultras_range$",        cb_ultras_range),
+        ("^sc_use$",              cb_sc_use),
+        ("^sc_skip$",             cb_sc_skip),
         # Training
         ("^training_diff_",       cb_training_difficulty),
         ("^training_start$",      cb_training_start),
