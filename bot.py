@@ -521,13 +521,28 @@ def _get_phrase(pid: str) -> dict:
 
 
 def _display_name(user: dict) -> str:
-    """Return display name with active title prefix if set."""
+    """Return display name with active title prefix if set (plain text, MarkdownV2-safe)."""
     name = user.get("display_name", "?")
     title_id = user.get("active_title")
     if title_id:
         t = _get_title(title_id)
         if t:
             return f"{t['emoji']} {t['label']} • {name}"
+    return name
+
+
+def _display_name_html(user: dict) -> str:
+    """Return HTML-formatted display name with title and club emblem (for HTML parse_mode messages)."""
+    name = _hesc(user.get("display_name", "?"))
+    title_id = user.get("active_title")
+    if title_id:
+        t = _get_title(title_id)
+        if t:
+            name = f"{t['emoji']} {_hesc(t['label'])} • {name}"
+    allegiance_id = str(user.get("club_allegiance") or "")
+    if allegiance_id:
+        emblem = club_emblem_html(allegiance_id, "🏟")
+        name = f"{emblem} {name}"
     return name
 
 
@@ -1278,11 +1293,11 @@ async def cb_select_opponent(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     try:
         await ctx.bot.send_message(
             target["user_id"],
-            f"⚔️ *{_esc(_display_name(user))}* вызывает тебя\\!\n\n"
-            f"🏅 Рейтинг: {_esc(rating_display(user))}\n"
-            f"🎮 Игр: {gp_c} \\| ✅ Побед: {wins_c} \\| ❌ Поражений: {losses_c}\n"
-            f"📊 Винрейт: {_esc(wr_c)}",
-            parse_mode=ParseMode.MARKDOWN_V2,
+            f"⚔️ <b>{_display_name_html(user)}</b> вызывает тебя!\n\n"
+            f"🏅 Рейтинг: {_hesc(rating_display(user))}\n"
+            f"🎮 Игр: {gp_c} | ✅ Побед: {wins_c} | ❌ Поражений: {losses_c}\n"
+            f"📊 Винрейт: {_hesc(wr_c)}",
+            parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("✅ Принять", callback_data=f"challenge_accept_{challenge_id}_{user_id}"),
                 InlineKeyboardButton("❌ Отклонить", callback_data=f"challenge_decline_{challenge_id}_{user_id}"),
@@ -1437,11 +1452,11 @@ async def _start_game(
 
     await asyncio.sleep(0.8)
     result_text = (
-        f"✅ Первым ходит *{_esc(first_player['display_name'])}*\\!"
+        f"✅ Первым ходит <b>{_display_name_html(first_player)}</b>!"
     )
     for msg in [coin_msg_a, coin_msg_b]:
         try:
-            await msg.edit_text(result_text, parse_mode=ParseMode.MARKDOWN_V2)
+            await msg.edit_text(result_text, parse_mode=ParseMode.HTML)
         except TelegramError:
             pass
 
@@ -1466,18 +1481,18 @@ async def _start_game(
     # Notify picker
     await ctx.bot.send_message(
         first_id,
-        f"⚔️ Игра против *{_esc(second_player['display_name'])}*\\!\n\n"
-        f"Раунд *1/{TOTAL_ROUNDS}* — твой ход\\. Выбери лигу:",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"⚔️ Игра против <b>{_display_name_html(second_player)}</b>!\n\n"
+        f"Раунд <b>1/{TOTAL_ROUNDS}</b> — твой ход. Выбери лигу:",
+        parse_mode=ParseMode.HTML,
         reply_markup=leagues_kb(game_id=game_id),
     )
 
     # Notify guesser
     await ctx.bot.send_message(
         second_id,
-        f"⚔️ Игра против *{_esc(first_player['display_name'])}*\\!\n\n"
-        f"Раунд *1/{TOTAL_ROUNDS}* — соперник выбирает трансфер\\.\\.\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
+        f"⚔️ Игра против <b>{_display_name_html(first_player)}</b>!\n\n"
+        f"Раунд <b>1/{TOTAL_ROUNDS}</b> — соперник выбирает трансфер...",
+        parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
     )
 
