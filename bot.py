@@ -4015,7 +4015,29 @@ def create_application() -> Application:
     return app
 
 
+def _start_health_server() -> None:
+    """Minimal HTTP server so Render / other PaaS hosts see a live port."""
+    import os
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):  # silence access logs
+            pass
+
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logger.info("Health-check server listening on port %d", port)
+
+
 def main() -> None:
+    _start_health_server()
     app = create_application()
     _reload_cosm_overrides()   # load DB overrides into cache on startup
     logger.info("Bot started. Polling…")
