@@ -3420,6 +3420,85 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_sendpack(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """/sendpack @user1 @user2 ... — superadmin: send 2 beta packs to each listed user."""
+    if not _is_superadmin(update.effective_user.id):
+        return
+    if not ctx.args:
+        await update.message.reply_text(
+            "Использование: `/sendpack @username1 @username2`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    pack_text = (
+        "🎉 *Спасибо за бета\\-тест Transfer Guesser\\!*\n\n"
+        "Вы одни из первых, кто помог протестировать игру\\.\n"
+        "За это — специальный бета\\-пак 🎁\n\n"
+        "_Нажми чтобы открыть\\!_"
+    )
+
+    lines: list[str] = []
+    for raw in ctx.args:
+        username = raw.lstrip("@")
+        target = db.get_user_by_username(username)
+        if not target:
+            lines.append(f"❌ @{username} — не найден в базе")
+            continue
+
+        target_id = target["user_id"]
+        sent = 0
+        for _ in range(2):
+            amount = random.randrange(1_000, 10_001, 500)  # 1000, 1500, …, 10000
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "🎁 Открыть бета-пак",
+                    callback_data=f"betapack_{amount}_{target_id}",
+                )
+            ]])
+            try:
+                await ctx.bot.send_message(
+                    target_id, pack_text,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=kb,
+                )
+                sent += 1
+            except TelegramError as e:
+                logger.warning("sendpack: failed to DM %s: %s", username, e)
+
+        status = f"✅ @{username} — {sent}/2 пака отправлено"
+        lines.append(status)
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cb_betapack_open(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """betapack_<amount>_<owner_id> — open a beta pack (one-time, owner only)."""
+    q = update.callback_query
+    user_id = q.from_user.id
+
+    parts = q.data.split("_")          # ['betapack', '<amount>', '<owner_id>']
+    try:
+        amount   = int(parts[1])
+        owner_id = int(parts[2])
+    except (IndexError, ValueError):
+        await q.answer("Ошибка пака.", show_alert=True)
+        return
+
+    if user_id != owner_id:
+        await q.answer("Это не твой пак! 👀", show_alert=True)
+        return
+
+    db.add_coins(user_id, amount)
+    await q.answer(f"🎉 +{amount:,} монет!".replace(",", " "), show_alert=False)
+    await q.edit_message_text(
+        f"🎉 *Спасибо за бета\\-тест Transfer Guesser\\!*\n\n"
+        f"💰 Бета\\-пак открыт\\!\n"
+        f"Ты получил: *{amount:,} монет* 🪙".replace(",", " "),
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
 async def cb_dbg_lookup(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -4790,10 +4869,11 @@ def create_application() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
-    app.add_handler(CommandHandler("help",   cmd_help))
-    app.add_handler(CommandHandler("debug",  cmd_debug))
+    app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("cancel",   cmd_cancel))
+    app.add_handler(CommandHandler("help",     cmd_help))
+    app.add_handler(CommandHandler("debug",    cmd_debug))
+    app.add_handler(CommandHandler("sendpack", cmd_sendpack))
 
     # Callback queries — specific patterns before general ones
     handlers = [
@@ -4842,6 +4922,7 @@ def create_application() -> Application:
         ("^sc_use$",              cb_sc_use),
         ("^sc_skip$",             cb_sc_skip),
         ("^rev_ans_\\d$",         cb_reverse_answer),
+        ("^betapack_",            cb_betapack_open),
         # Training
         ("^training_diff_",       cb_training_difficulty),
         ("^training_start$",      cb_training_start),
