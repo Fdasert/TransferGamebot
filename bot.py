@@ -53,6 +53,46 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── Derby definitions ─────────────────────────────────────────────────────────
+
+DERBY_PAIRS: dict[frozenset, tuple[str, int]] = {
+    frozenset(["418", "131"]): ("⚽ Эль Класико", 1),
+    frozenset(["281", "985"]): ("🔵🔴 Манчестерское дерби", 1),
+    frozenset(["11",  "148"]): ("🔴⚪ Северолондонское дерби", 1),
+    frozenset(["31",  "29" ]): ("💙❤️ Мерсисайдское дерби", 1),
+    frozenset(["46",  "5"  ]): ("⚫🔵 Дерби делла Мадоннина", 1),
+    frozenset(["12",  "398"]): ("🟡🔵 Дерби делла Капитале", 1),
+    frozenset(["506", "416"]): ("⚫⚪ Дерби делла Моле", 1),
+    frozenset(["13",  "418"]): ("❤️⚪ Мадридское дерби", 1),
+    frozenset(["583", "244"]): ("🔵🔴 Ле Классик", 1),
+    frozenset(["27",  "16" ]): ("🔴🟡 Дер Классикер", 1),
+    frozenset(["232", "2410"]): ("🔴🔵 Московское дерби", 1),
+    frozenset(["232", "964"]): ("🔴🔵 Дерби двух столиц", 1),
+    frozenset(["2410","964"]): ("🔵🔴 Дерби ЦСКА–Зенит", 1),
+}
+
+_LEAGUE_CLUB_IDS: dict[str, list[str]] = {
+    "PL":  ["281","31","11","985","631","148","762","405","379","1237","29","1003","873","1148","931","703","989","543","180","677"],
+    "LL":  ["418","131","13","368","681","150","12321","621","1050","3709","1049","940","367","237","331","714","472","1108","366","1244"],
+    "BL":  ["27","16","15","23826","24","79","89","82","60","39","18","533","167","80","86","2036","35","269"],
+    "SA":  ["46","5","506","6195","12","398","800","430","1025","1047","130","410","416","276","252","2919","1390","749","1005","607"],
+    "L1":  ["583","162","244","1082","1041","417","3911","273","995","969","826","667","415","738","618","1420","290","1421"],
+    "RPL": ["964","2410","232","932","121","16704","3725","1083"],
+}
+
+
+def _detect_derby(club1_id: str, club2_id: str) -> tuple[int, str] | None:
+    """Returns (level, derby_name) or None if no derby."""
+    pair = frozenset([club1_id, club2_id])
+    if pair in DERBY_PAIRS:
+        name, level = DERBY_PAIRS[pair]
+        return level, name
+    for clubs in _LEAGUE_CLUB_IDS.values():
+        if club1_id in clubs and club2_id in clubs:
+            return 2, "🏟 Лиговое дерби"
+    return None
+
+
 # ── Achievement definitions ───────────────────────────────────────────────────
 
 ACHIEVEMENTS: dict[str, dict] = {
@@ -625,12 +665,20 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _help_rules_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏟 Фан клубы", callback_data="help_fanclubs")],
+        [InlineKeyboardButton("🏟 Фан клубы", callback_data="help_fanclubs"),
+         InlineKeyboardButton("⚔️ Дерби", callback_data="help_derby")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
 
 
 def _help_fanclubs_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("← Правила", callback_data="help_rules")],
+        [InlineKeyboardButton("← В меню", callback_data="menu_back")],
+    ])
+
+
+def _help_derby_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("← Правила", callback_data="help_rules")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
@@ -681,6 +729,25 @@ HELP_FANCLUBS_TEXT = (
     "└ 🎯 *Второй шанс:* если не угадал — можешь попробовать ещё раз\\. "
     "Правильная цена при этом скрыта, засчитывается лучший из двух ответов\n\n"
     "_Способности работают только для трансферов своего фан\\-клуба, один раз за игру_"
+)
+
+HELP_DERBY_TEXT = (
+    "*⚔️ Дерби*\n\n"
+    "Когда два игрока с разными фан\\-клубами встречаются в игре — автоматически определяется уровень дерби\\!\n\n"
+    "*🏆 Классическое дерби* \\(исторические противостояния\\):\n"
+    "Эль Класико, Манчестерское, Московское и другие известные дерби\\.\n"
+    "• 8 раундов \\(по 4 каждому\\)\n"
+    "• Каждый выбирает только из трансферов своего клуба\n"
+    "• Без подсказок\n"
+    "• Очки ×2\n"
+    "• Последние раунды особые \\(слепой или обмен\\)\n\n"
+    "*🏟 Лиговое дерби* \\(клубы из одной лиги\\):\n"
+    "• Обычные 6 раундов\n"
+    "• Очки ×1\\.5\n\n"
+    "*⚡ Особые раунды \\(классическое дерби\\):*\n\n"
+    "🕵️ *Слепой раунд* — имя игрока скрыто, угадываешь только по клубу и сезону\n\n"
+    "🔄 *Раунд обмена* — система выбирает трансфер автоматически\\. Оба игрока угадывают по очереди \\(пикер не видит цену\\)\\. "
+    "Тот, кто угадал точнее, получает бонус \\+5 очков"
 )
 
 
@@ -1257,6 +1324,16 @@ async def cb_help_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cb_help_derby(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        HELP_DERBY_TEXT,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_help_derby_kb(),
+    )
+
+
 async def cb_menu_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -1515,6 +1592,31 @@ async def _start_game(
     first_id = first_player["user_id"]
     second_id = second_player["user_id"]
 
+    # ── Derby detection ───────────────────────────────────────────────────────
+    a_club = str(player_a.get("club_allegiance") or "")
+    b_club = str(player_b.get("club_allegiance") or "")
+    derby_level = 0
+    derby_name = ""
+    derby_total_rounds = TOTAL_ROUNDS
+    derby_specials: dict = {}
+
+    if a_club and b_club:
+        result = _detect_derby(a_club, b_club)
+        if result:
+            derby_level, derby_name = result
+            if derby_level == 1:
+                derby_total_rounds = 8
+                derby_specials = {
+                    "7": random.choice(["blind", "exchange"]),
+                    "8": random.choice(["blind", "exchange"]),
+                }
+            else:
+                derby_total_rounds = TOTAL_ROUNDS
+
+    # each player's own club for derby
+    first_derby_club = str(first_player.get("club_allegiance") or "")
+    second_derby_club = str(second_player.get("club_allegiance") or "")
+
     game = db.create_game(first_id, second_id)
     game_id = game["game_id"]
 
@@ -1541,43 +1643,123 @@ async def _start_game(
 
     await asyncio.sleep(1.0)
 
+    # Send derby announcement
+    if derby_level == 1:
+        derby_ann = (
+            f"🏆 <b>{derby_name}!</b>\n\n"
+            f"Особые правила:\n"
+            f"• 8 раундов\n"
+            f"• Каждый выбирает трансферы только своего клуба\n"
+            f"• Без подсказок\n"
+            f"• Очки ×2\n"
+            f"• Последние раунды — особые правила"
+        )
+        for pid in [first_id, second_id]:
+            try:
+                await ctx.bot.send_message(pid, derby_ann, parse_mode=ParseMode.HTML)
+            except TelegramError:
+                pass
+    elif derby_level == 2:
+        derby_ann = f"🏟 <b>Лиговое дерби!</b>\nОчки ×1.5"
+        for pid in [first_id, second_id]:
+            try:
+                await ctx.bot.send_message(pid, derby_ann, parse_mode=ParseMode.HTML)
+            except TelegramError:
+                pass
+
     # Create first round
-    round_row = db.create_round(game_id, 1, first_id, second_id)
+    db.create_round(game_id, 1, first_id, second_id)
 
-    # Set states
-    await set_state(first_id, "picking_league", {
-        "game_id": game_id,
-        "round_num": 1,
-        "opponent_id": second_id,
-        "ultras_range_used": False,
-        "legend_sc_used": False,
-    })
-    await set_state(second_id, "waiting_for_pick", {
-        "game_id": game_id,
-        "round_num": 1,
-        "picker_id": first_id,
-        "opponent_id": first_id,
-        "ultras_range_used": False,
-        "legend_sc_used": False,
-    })
+    # Common derby fields for state
+    derby_fields_first = {
+        "derby_level": derby_level,
+        "derby_name": derby_name,
+        "derby_total_rounds": derby_total_rounds,
+        "derby_my_club": first_derby_club,
+        "derby_opp_club": second_derby_club,
+        "derby_specials": derby_specials,
+    }
+    derby_fields_second = {
+        "derby_level": derby_level,
+        "derby_name": derby_name,
+        "derby_total_rounds": derby_total_rounds,
+        "derby_my_club": second_derby_club,
+        "derby_opp_club": first_derby_club,
+        "derby_specials": derby_specials,
+    }
 
-    # Notify picker
-    await ctx.bot.send_message(
-        first_id,
-        f"⚔️ Игра против <b>{_display_name_html(second_player)}</b>!\n\n"
-        f"Раунд <b>1/{TOTAL_ROUNDS}</b> — твой ход. Выбери лигу:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=leagues_kb(game_id=game_id),
-    )
+    if derby_level == 1 and first_derby_club:
+        # Level 1 derby: picker goes straight to their club's transfers
+        transfers = db.get_transfers_by_club(first_derby_club)
+        await set_state(first_id, "picking_transfer", {
+            "game_id": game_id,
+            "round_num": 1,
+            "opponent_id": second_id,
+            "club_id": first_derby_club,
+            "transfer_ids": [t["id"] for t in transfers],
+            "ultras_range_used": False,
+            "legend_sc_used": False,
+            **derby_fields_first,
+        })
+        await set_state(second_id, "waiting_for_pick", {
+            "game_id": game_id,
+            "round_num": 1,
+            "picker_id": first_id,
+            "opponent_id": first_id,
+            "ultras_range_used": False,
+            "legend_sc_used": False,
+            **derby_fields_second,
+        })
 
-    # Notify guesser
-    await ctx.bot.send_message(
-        second_id,
-        f"⚔️ Игра против <b>{_display_name_html(first_player)}</b>!\n\n"
-        f"Раунд <b>1/{TOTAL_ROUNDS}</b> — соперник выбирает трансфер...",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
-    )
+        await ctx.bot.send_message(
+            first_id,
+            f"⚔️ {derby_name} — Раунд <b>1/{derby_total_rounds}</b>\nВыбери трансфер из своего клуба:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=transfers_kb(transfers, game_id=game_id),
+        )
+        await ctx.bot.send_message(
+            second_id,
+            f"⚔️ Раунд <b>1/{derby_total_rounds}</b> — соперник выбирает трансфер своего клуба...",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
+        )
+    else:
+        # Normal start (or level 2 derby uses normal flow)
+        await set_state(first_id, "picking_league", {
+            "game_id": game_id,
+            "round_num": 1,
+            "opponent_id": second_id,
+            "ultras_range_used": False,
+            "legend_sc_used": False,
+            **derby_fields_first,
+        })
+        await set_state(second_id, "waiting_for_pick", {
+            "game_id": game_id,
+            "round_num": 1,
+            "picker_id": first_id,
+            "opponent_id": first_id,
+            "ultras_range_used": False,
+            "legend_sc_used": False,
+            **derby_fields_second,
+        })
+
+        # Notify picker
+        await ctx.bot.send_message(
+            first_id,
+            f"⚔️ Игра против <b>{_display_name_html(second_player)}</b>!\n\n"
+            f"Раунд <b>1/{derby_total_rounds}</b> — твой ход. Выбери лигу:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=leagues_kb(game_id=game_id),
+        )
+
+        # Notify guesser
+        await ctx.bot.send_message(
+            second_id,
+            f"⚔️ Игра против <b>{_display_name_html(first_player)}</b>!\n\n"
+            f"Раунд <b>1/{derby_total_rounds}</b> — соперник выбирает трансфер...",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
+        )
 
 
 # ── Picker flow ───────────────────────────────────────────────────────────────
@@ -1663,6 +1845,10 @@ async def cb_pick_league_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     user_id = q.from_user.id
     action, data = await get_state(user_id)
     if action not in ("picking_club", "picking_transfer"):
+        return
+    # In derby level 1, picker must stay within their club — no going back to leagues
+    if data.get("derby_level") == 1:
+        await q.answer("⚔️ В дерби ты выбираешь только из своего клуба!", show_alert=True)
         return
     await set_state(user_id, "picking_league", data)
     await q.edit_message_text("Выбери лигу:", reply_markup=leagues_kb(game_id=data.get("game_id")))
@@ -1769,26 +1955,114 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if round_row:
         db.update_round(round_row["id"], transfer_id=transfer_id)
 
+    # Derby fields from picker's state
+    derby_level = data.get("derby_level", 0)
+    derby_name = data.get("derby_name", "")
+    derby_total_rounds = data.get("derby_total_rounds", TOTAL_ROUNDS)
+    derby_specials = data.get("derby_specials", {})
+    derby_my_club = data.get("derby_my_club", "")
+    derby_opp_club = data.get("derby_opp_club", "")
+    derby_special_type = data.get("derby_special_type", "")
+
+    # Check if this is an exchange round
+    is_exchange = derby_special_type == "exchange"
+
     # Switch picker to waiting (carry their ability flags from picking state)
-    await set_state(user_id, "waiting_for_guess", {
+    picker_wait_state: dict = {
         "game_id": game_id,
         "round_num": round_num,
         "opponent_id": opponent_id,
         "ultras_range_used": data.get("ultras_range_used", False),
         "legend_sc_used": data.get("legend_sc_used", False),
-    })
+        "derby_level": derby_level,
+        "derby_name": derby_name,
+        "derby_total_rounds": derby_total_rounds,
+        "derby_my_club": derby_my_club,
+        "derby_opp_club": derby_opp_club,
+        "derby_specials": derby_specials,
+    }
 
     # Carry guesser's ability flags from their waiting_for_pick state
     _, guesser_wait_data = await get_state(opponent_id)
     guesser_ultras_used = (guesser_wait_data or {}).get("ultras_range_used", False)
     guesser_sc_used = (guesser_wait_data or {}).get("legend_sc_used", False)
+    guesser_derby_my_club = (guesser_wait_data or {}).get("derby_my_club", "")
+    guesser_derby_opp_club = (guesser_wait_data or {}).get("derby_opp_club", "")
 
-    # ── 5% chance of a reverse round ─────────────────────────────────────────
+    # ── 5% chance of a reverse round (only for non-derby or level 2) ──────────
     reverse_extra: dict = {}
-    if random.random() < 0.05:
+    if derby_level == 0 and random.random() < 0.05:
         result = _build_reverse_round(transfer)
         if result:
             reverse_extra = result
+
+    picker = db.get_user(user_id)
+    picker_name = picker["display_name"] if picker else "Соперник"
+    picker_phrases = db.get_user_cosmetics(user_id, "phrase")
+    picker_kb_rows = []
+    if picker_phrases:
+        picker_kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{opponent_id}")])
+    picker_kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
+    picker_wait_kb = InlineKeyboardMarkup(picker_kb_rows)
+
+    game = db.get_game(game_id)
+    p1_score = game["player1_score"]
+    p2_score = game["player2_score"]
+
+    if is_exchange:
+        # Exchange round: picker chose transfer but doesn't see the price
+        # Store transfer data in picker's state for later comparison
+        picker_wait_state["exchange_transfer_id"] = transfer_id
+        picker_wait_state["exchange_transfer_fee"] = transfer["transfer_fee"]
+        picker_wait_state["exchange_player_name"] = transfer["player_name"]
+        await set_state(user_id, "exchange_waiting", picker_wait_state)
+
+        # Guesser gets normal prompt (no hint for derby level 1)
+        guesser_state_ex: dict = {
+            "game_id": game_id,
+            "round_num": round_num,
+            "transfer_id": transfer_id,
+            "player_name": transfer["player_name"],
+            "actual_fee": transfer["transfer_fee"],
+            "hints_used": 0,
+            "used_hint_types": [],
+            "picker_id": user_id,
+            "transfer_club_id": str(transfer.get("club_id", "") or ""),
+            "ultras_range_used": guesser_ultras_used,
+            "legend_sc_used": guesser_sc_used,
+            "derby_level": derby_level,
+            "derby_name": derby_name,
+            "derby_total_rounds": derby_total_rounds,
+            "derby_my_club": guesser_derby_my_club,
+            "derby_opp_club": guesser_derby_opp_club,
+            "derby_specials": derby_specials,
+            "derby_special_type": "exchange",
+            "is_exchange_guesser": True,
+        }
+        await set_state(opponent_id, "guessing", guesser_state_ex)
+
+        # Picker sees transfer chosen but NOT the price
+        await q.edit_message_text(
+            f"⚔️ Раунд обмена!\n\n"
+            f"👤 Игрок: <b>{_hesc(transfer['player_name'])}</b>\n"
+            f"💰 Цена скрыта — ты тоже будешь угадывать!\n\n"
+            f"Ждём ответа соперника...",
+            parse_mode=ParseMode.HTML,
+            reply_markup=picker_wait_kb,
+        )
+
+        # Guesser gets guess prompt
+        guesser_user_obj = db.get_user(opponent_id)
+        await _send_guess_prompt(
+            ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name,
+            picker_id=user_id, game_id=game_id,
+            transfer_club_id=str(transfer.get("club_id", "") or ""),
+            guesser_user=guesser_user_obj,
+            ultras_range_used=guesser_ultras_used,
+            derby_level=derby_level,
+            is_exchange_round=True,
+        )
+        return
 
     # Build guesser state
     guesser_state: dict = {
@@ -1803,24 +2077,19 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         "transfer_club_id": str(transfer.get("club_id", "") or ""),
         "ultras_range_used": guesser_ultras_used,
         "legend_sc_used": guesser_sc_used,
+        "derby_level": derby_level,
+        "derby_name": derby_name,
+        "derby_total_rounds": derby_total_rounds,
+        "derby_my_club": guesser_derby_my_club,
+        "derby_opp_club": guesser_derby_opp_club,
+        "derby_specials": derby_specials,
+        "derby_special_type": derby_special_type,
     }
     if reverse_extra:
         guesser_state.update(reverse_extra)
 
     await set_state(opponent_id, "guessing", guesser_state)
-
-    picker = db.get_user(user_id)
-    picker_name = picker["display_name"] if picker else "Соперник"
-    picker_phrases = db.get_user_cosmetics(user_id, "phrase")
-    picker_kb_rows = []
-    if picker_phrases:
-        picker_kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{opponent_id}")])
-    picker_kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
-    picker_wait_kb = InlineKeyboardMarkup(picker_kb_rows)
-
-    game = db.get_game(game_id)
-    p1_score = game["player1_score"]
-    p2_score = game["player2_score"]
+    await set_state(user_id, "waiting_for_guess", picker_wait_state)
 
     if reverse_extra:
         attr = reverse_extra["reverse_attr"]
@@ -1840,14 +2109,25 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             options=reverse_extra.get("reverse_options"),
         )
     else:
-        await q.edit_message_text(
-            f"✅ Трансфер выбран\\!\n\n"
-            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
-            f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
-            f"Ждём ответа соперника\\.\\.\\.",
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=picker_wait_kb,
-        )
+        is_blind = derby_special_type == "blind"
+        if derby_level == 1 and not is_blind:
+            await q.edit_message_text(
+                f"✅ Трансфер выбран!\n\n"
+                f"👤 Игрок: <b>{_hesc(transfer['player_name'])}</b>\n"
+                f"💰 Настоящая цена: <b>{_hesc(format_fee(transfer['transfer_fee']))}</b>\n\n"
+                f"Ждём ответа соперника...",
+                parse_mode=ParseMode.HTML,
+                reply_markup=picker_wait_kb,
+            )
+        else:
+            await q.edit_message_text(
+                f"✅ Трансфер выбран\\!\n\n"
+                f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
+                f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
+                f"Ждём ответа соперника\\.\\.\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=picker_wait_kb,
+            )
         guesser_user_obj = db.get_user(opponent_id)
         await _send_guess_prompt(
             ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name,
@@ -1855,6 +2135,8 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             transfer_club_id=str(transfer.get("club_id", "") or ""),
             guesser_user=guesser_user_obj,
             ultras_range_used=guesser_ultras_used,
+            derby_level=derby_level,
+            is_blind_round=is_blind,
         )
 
 
@@ -1873,15 +2155,43 @@ async def _send_guess_prompt(
     transfer_club_id: str = "",
     guesser_user: dict | None = None,
     ultras_range_used: bool = False,
+    derby_level: int = 0,
+    is_blind_round: bool = False,
+    is_exchange_round: bool = False,
 ) -> None:
-    hint_lines = _build_hint_lines(transfer, used_hint_types)
-    can_hint = hints_used < MAX_HINTS
+    # Derby level 1: no hints allowed
+    if derby_level == 1:
+        can_hint = False
+    else:
+        can_hint = hints_used < MAX_HINTS
 
-    text = (
-        f"⚽ Раунд *{round_num}/{TOTAL_ROUNDS}*\n"
-        f"Трансфер от *{_esc(picker_name)}*\n\n"
-        f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
-    )
+    # Determine the total rounds to display
+    # (We'll just use TOTAL_ROUNDS as a default display; derby changes come from state)
+    # The round_num is always correct from state
+    hint_lines = _build_hint_lines(transfer, used_hint_types)
+
+    # Blind round: hide player name
+    display_name = "????" if is_blind_round else transfer["player_name"]
+
+    if is_blind_round:
+        text = (
+            f"⚽ Раунд *{round_num}* ⚡ *СЛЕПОЙ РАУНД\\!*\n"
+            f"Трансфер от *{_esc(picker_name)}*\n\n"
+            f"👤 Игрок: *????*\n"
+        )
+    elif is_exchange_round:
+        text = (
+            f"⚔️ *РАУНД ОБМЕНА\\!*\n\n"
+            f"⚽ Раунд *{round_num}*\n"
+            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
+        )
+    else:
+        text = (
+            f"⚽ Раунд *{round_num}*\n"
+            f"Трансфер от *{_esc(picker_name)}*\n\n"
+            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
+        )
+
     if hint_lines:
         text += "\n" + "\n".join(hint_lines) + "\n"
 
@@ -1892,9 +2202,10 @@ async def _send_guess_prompt(
 
     kb_rows = []
 
-    # Ультрас ability: show range button if eligible
+    # Ультрас ability: show range button if eligible (not for derby level 1)
     if (
-        not ultras_range_used
+        derby_level != 1
+        and not ultras_range_used
         and transfer_club_id
         and guesser_user
         and str(guesser_user.get("club_allegiance") or "") == transfer_club_id
@@ -1920,7 +2231,9 @@ async def _send_guess_prompt(
         kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
 
     kb = InlineKeyboardMarkup(kb_rows) if kb_rows else None
-    await _send_photo_message(ctx, guesser_id, transfer.get("photo_url"), text, kb)
+    # For blind round we don't show the player photo (would reveal identity)
+    photo_url = None if is_blind_round else transfer.get("photo_url")
+    await _send_photo_message(ctx, guesser_id, photo_url, text, kb)
 
 
 def _build_hint_lines(transfer: dict, used_hint_types: list[str]) -> list[str]:
@@ -2056,6 +2369,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _handle_registration(update, text)
     elif action == "guessing":
         await _handle_guess(update, ctx, text, data)
+    elif action == "exchange_guessing_picker":
+        await _handle_exchange_picker_guess(update, ctx, text, data)
     elif action == "training_guessing":
         await _handle_training_guess(update, ctx, text, data)
     elif action in ("dbg_set_coins", "dbg_set_rating") or (
@@ -2107,7 +2422,14 @@ async def _advance_round(
 ) -> None:
     """Advance to next round or finish game. Called after a round is fully resolved."""
     next_round = round_num + 1
-    if next_round > TOTAL_ROUNDS:
+
+    # Use derby_total_rounds from guesser_data if present
+    derby_total_rounds = guesser_data.get("derby_total_rounds", TOTAL_ROUNDS)
+    derby_level = guesser_data.get("derby_level", 0)
+    derby_name = guesser_data.get("derby_name", "")
+    derby_specials = guesser_data.get("derby_specials", {})
+
+    if next_round > derby_total_rounds:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
         return
 
@@ -2123,42 +2445,121 @@ async def _advance_round(
     new_guesser_ultras_used = picker_data.get("ultras_range_used", False)
     new_guesser_sc_used = picker_data.get("legend_sc_used", False)
 
-    await set_state(new_picker_id, "picking_league", {
-        "game_id": game_id,
-        "round_num": next_round,
-        "opponent_id": new_guesser_id,
-        "ultras_range_used": new_picker_ultras_used,
-        "legend_sc_used": new_picker_sc_used,
-    })
-    await set_state(new_guesser_id, "waiting_for_pick", {
-        "game_id": game_id,
-        "round_num": next_round,
-        "picker_id": new_picker_id,
-        "opponent_id": new_picker_id,
-        "ultras_range_used": new_guesser_ultras_used,
-        "legend_sc_used": new_guesser_sc_used,
-    })
+    # Derby fields: each player carries their own club
+    # new_picker was the guesser — use guesser_data for their club
+    new_picker_derby_club = guesser_data.get("derby_my_club", "")
+    new_picker_opp_club = guesser_data.get("derby_opp_club", "")
+    # new_guesser was the picker — use picker_data for their club
+    new_guesser_derby_club = picker_data.get("derby_my_club", "")
+    new_guesser_opp_club = picker_data.get("derby_opp_club", "")
+
+    derby_fields_picker = {
+        "derby_level": derby_level,
+        "derby_name": derby_name,
+        "derby_total_rounds": derby_total_rounds,
+        "derby_my_club": new_picker_derby_club,
+        "derby_opp_club": new_picker_opp_club,
+        "derby_specials": derby_specials,
+    }
+    derby_fields_guesser = {
+        "derby_level": derby_level,
+        "derby_name": derby_name,
+        "derby_total_rounds": derby_total_rounds,
+        "derby_my_club": new_guesser_derby_club,
+        "derby_opp_club": new_guesser_opp_club,
+        "derby_specials": derby_specials,
+    }
 
     my_score_picker = p1_score if new_picker_id == p1_id else p2_score
     opp_score_picker = p2_score if new_picker_id == p1_id else p1_score
-
-    await ctx.bot.send_message(
-        new_picker_id,
-        f"📊 Счёт: *{my_score_picker}* — *{opp_score_picker}*\n\n"
-        f"Раунд *{next_round}/{TOTAL_ROUNDS}* — твой ход\\. Выбери лигу:",
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=leagues_kb(game_id=game_id),
-    )
-
     my_score_guesser = p1_score if new_guesser_id == p1_id else p2_score
     opp_score_guesser = p2_score if new_guesser_id == p1_id else p1_score
-    await ctx.bot.send_message(
-        new_guesser_id,
-        f"📊 Счёт: *{my_score_guesser}* — *{opp_score_guesser}*\n\n"
-        f"Раунд *{next_round}/{TOTAL_ROUNDS}* — соперник выбирает трансфер\\.\\.\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
-    )
+
+    # Check if the upcoming round is a special derby round
+    special_type = derby_specials.get(str(next_round), "") if derby_level == 1 else ""
+
+    if derby_level == 1 and new_picker_derby_club:
+        # Level 1 derby: picker goes straight to their club's transfers
+        picker_state: dict = {
+            "game_id": game_id,
+            "round_num": next_round,
+            "opponent_id": new_guesser_id,
+            "ultras_range_used": new_picker_ultras_used,
+            "legend_sc_used": new_picker_sc_used,
+            "club_id": new_picker_derby_club,
+            **derby_fields_picker,
+        }
+        if special_type:
+            picker_state["derby_special_type"] = special_type
+
+        guesser_state: dict = {
+            "game_id": game_id,
+            "round_num": next_round,
+            "picker_id": new_picker_id,
+            "opponent_id": new_picker_id,
+            "ultras_range_used": new_guesser_ultras_used,
+            "legend_sc_used": new_guesser_sc_used,
+            **derby_fields_guesser,
+        }
+        if special_type:
+            guesser_state["derby_special_type"] = special_type
+
+        transfers = db.get_transfers_by_club(new_picker_derby_club)
+        picker_state["transfer_ids"] = [t["id"] for t in transfers]
+
+        await set_state(new_picker_id, "picking_transfer", picker_state)
+        await set_state(new_guesser_id, "waiting_for_pick", guesser_state)
+
+        await ctx.bot.send_message(
+            new_picker_id,
+            f"📊 Счёт: {my_score_picker} — {opp_score_picker}\n\n"
+            f"⚔️ {derby_name} — Раунд <b>{next_round}/{derby_total_rounds}</b>\n"
+            f"Выбери трансфер из своего клуба:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=transfers_kb(transfers, game_id=game_id),
+        )
+        await ctx.bot.send_message(
+            new_guesser_id,
+            f"📊 Счёт: {my_score_guesser} — {opp_score_guesser}\n\n"
+            f"⚔️ Раунд <b>{next_round}/{derby_total_rounds}</b> — соперник выбирает трансфер своего клуба...",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
+        )
+    else:
+        await set_state(new_picker_id, "picking_league", {
+            "game_id": game_id,
+            "round_num": next_round,
+            "opponent_id": new_guesser_id,
+            "ultras_range_used": new_picker_ultras_used,
+            "legend_sc_used": new_picker_sc_used,
+            **derby_fields_picker,
+        })
+        await set_state(new_guesser_id, "waiting_for_pick", {
+            "game_id": game_id,
+            "round_num": next_round,
+            "picker_id": new_picker_id,
+            "opponent_id": new_picker_id,
+            "ultras_range_used": new_guesser_ultras_used,
+            "legend_sc_used": new_guesser_sc_used,
+            **derby_fields_guesser,
+        })
+
+        round_label = f"{next_round}/{derby_total_rounds}"
+        await ctx.bot.send_message(
+            new_picker_id,
+            f"📊 Счёт: *{my_score_picker}* — *{opp_score_picker}*\n\n"
+            f"Раунд *{round_label}* — твой ход\\. Выбери лигу:",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=leagues_kb(game_id=game_id),
+        )
+
+        await ctx.bot.send_message(
+            new_guesser_id,
+            f"📊 Счёт: *{my_score_guesser}* — *{opp_score_guesser}*\n\n"
+            f"Раунд *{round_label}* — соперник выбирает трансфер\\.\\.\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")]]),
+        )
 
 
 async def _handle_reverse_age(
@@ -2180,6 +2581,13 @@ async def _handle_reverse_age(
         points, tier_msg = 1, "😅 Почти\\!"
     else:
         points, tier_msg = 0, "❌ Мимо\\!"
+
+    # Derby multiplier
+    derby_level_ra = data.get("derby_level", 0)
+    if derby_level_ra == 1:
+        points = points * 2
+    elif derby_level_ra == 2:
+        points = int(points * 1.5)
 
     game_id    = data["game_id"]
     round_num  = data["round_num"]
@@ -2237,7 +2645,8 @@ async def _handle_reverse_age(
     await clear_state(user_id)
 
     next_round = round_num + 1
-    if next_round > TOTAL_ROUNDS:
+    derby_total_rounds_ra = data.get("derby_total_rounds", TOTAL_ROUNDS)
+    if next_round > derby_total_rounds_ra:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
     else:
         await _advance_round(
@@ -2381,7 +2790,8 @@ async def _handle_guess(
         await clear_state(user_id)
 
         next_round = round_num + 1
-        if next_round > TOTAL_ROUNDS:
+        _derby_total_sc = data.get("derby_total_rounds", TOTAL_ROUNDS)
+        if next_round > _derby_total_sc:
             await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
         else:
             await _advance_round(
@@ -2403,6 +2813,60 @@ async def _handle_guess(
         return
 
     tier, points = calculate_points(guess, actual_fee, hints_used)
+
+    # ── Derby points multiplier ───────────────────────────────────────────────
+    derby_level = data.get("derby_level", 0)
+    if derby_level == 1:
+        points = points * 2
+    elif derby_level == 2:
+        points = int(points * 1.5)
+
+    # ── Exchange round: guesser answered first ────────────────────────────────
+    if data.get("is_exchange_guesser"):
+        # Save guesser result into picker's exchange_waiting state
+        picker_id_ex = data["picker_id"]
+        _, picker_ex_data = await get_state(picker_id_ex)
+        if picker_ex_data:
+            picker_ex_data["exchange_guesser_tier"] = tier
+            picker_ex_data["exchange_guesser_points"] = points
+            picker_ex_data["exchange_guesser_guess"] = guess
+            await set_state(picker_id_ex, "exchange_waiting", picker_ex_data)
+
+        # Tell guesser to wait
+        await update.message.reply_text(
+            "🎯 Ответ принят\\! Ждём пока соперник тоже угадает\\.\\.\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+
+        # Move picker to exchange_guessing_picker
+        actual_fee_ex = data["actual_fee"]
+        player_name_ex = data["player_name"]
+
+        # Update guesser state: mark that they answered
+        data["exchange_answered"] = True
+        await set_state(user_id, "guessing", data)
+
+        # Build picker guess state
+        picker_ex_state: dict = dict(picker_ex_data or {})
+        picker_ex_state["action_type"] = "exchange_guessing_picker"
+        picker_ex_state["transfer_id"] = data["transfer_id"]
+        picker_ex_state["actual_fee"] = actual_fee_ex
+        picker_ex_state["player_name"] = player_name_ex
+        picker_ex_state["guesser_id_ref"] = user_id
+        picker_ex_state["hints_used"] = 0
+        picker_ex_state["used_hint_types"] = []
+        await set_state(picker_id_ex, "exchange_guessing_picker", picker_ex_state)
+
+        transfer_ex = db.get_transfer(data["transfer_id"])
+        await ctx.bot.send_message(
+            picker_id_ex,
+            f"⚔️ Твоя очередь\\! Угадай цену:\n"
+            f"👤 *{_esc(player_name_ex)}*\n\n"
+            f"💰 Назови сумму трансфера \\(в евро\\)\\:\n"
+            f"_Например: 45M, 45000000, 500K_",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
 
     # ── Club allegiance: track correct guesses & apply fan bonus ─────────────
     fan_bonus_coins = 0
@@ -2600,7 +3064,8 @@ async def _handle_guess(
 
     # Advance to next round or finish
     next_round = round_num + 1
-    if next_round > TOTAL_ROUNDS:
+    _derby_total_hg2 = data.get("derby_total_rounds", TOTAL_ROUNDS)
+    if next_round > _derby_total_hg2:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
     else:
         await _advance_round(
@@ -2713,7 +3178,8 @@ async def cb_sc_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Advance to next round or finish
     next_round = round_num + 1
-    if next_round > TOTAL_ROUNDS:
+    _derby_total_sc2 = data.get("derby_total_rounds", TOTAL_ROUNDS)
+    if next_round > _derby_total_sc2:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
     else:
         await _advance_round(
@@ -2729,6 +3195,166 @@ async def cb_sc_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             guesser_id=user_id,
             picker_id=picker_id,
             guesser_data=data,
+            picker_action=picker_action_now or "",
+            picker_data=picker_data_now or {},
+        )
+
+
+# ── Exchange round picker-guess handler ───────────────────────────────────────
+
+async def _handle_exchange_picker_guess(
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    data: dict,
+) -> None:
+    """Handle picker's guess in an exchange round."""
+    user_id = update.effective_user.id
+
+    guess = parse_fee_input(text)
+    if guess is None:
+        await update.message.reply_text(
+            "Не могу распознать сумму\\. Примеры: `45M`, `45000000`, `500K`",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    actual_fee = data["actual_fee"]
+    player_name = data["player_name"]
+    game_id = data["game_id"]
+    round_num = data["round_num"]
+    guesser_id_ref = data.get("guesser_id_ref")
+    derby_level = data.get("derby_level", 1)
+
+    # Calculate picker's result
+    tier_p, points_p = calculate_points(guess, actual_fee, 0)
+    if derby_level == 1:
+        points_p = points_p * 2
+    elif derby_level == 2:
+        points_p = int(points_p * 1.5)
+
+    # Get guesser's stored result
+    guesser_guess = data.get("exchange_guesser_guess", 0)
+    guesser_points = data.get("exchange_guesser_points", 0)
+    guesser_tier = data.get("exchange_guesser_tier", "miss")
+
+    # Compare accuracy
+    picker_err = abs(guess - actual_fee) / actual_fee if actual_fee else float("inf")
+    guesser_err = abs(guesser_guess - actual_fee) / actual_fee if actual_fee else float("inf")
+
+    bonus_picker = 0
+    bonus_guesser = 0
+    if picker_err < guesser_err:
+        bonus_picker = 5
+        outcome_picker = "🏆 Ты точнее! +5 бонус"
+        outcome_guesser = "❌ Соперник точнее"
+    elif guesser_err < picker_err:
+        bonus_guesser = 5
+        outcome_picker = "❌ Соперник точнее"
+        outcome_guesser = "🏆 Ты точнее! +5 бонус"
+    else:
+        bonus_picker = 2
+        bonus_guesser = 2
+        outcome_picker = "🤝 Ничья! +2 бонус"
+        outcome_guesser = "🤝 Ничья! +2 бонус"
+
+    points_p += bonus_picker
+    final_guesser_points = guesser_points + bonus_guesser
+
+    # Update game scores
+    game = db.get_game(game_id)
+    p1_id = game["player1_id"]
+    p2_id = game["player2_id"]
+    p1_score = game["player1_score"]
+    p2_score = game["player2_score"]
+
+    # guesser_id_ref is the guesser
+    if guesser_id_ref == p1_id:
+        p1_score += final_guesser_points
+        p2_score += points_p
+    else:
+        p1_score += points_p
+        p2_score += final_guesser_points
+    db.update_game(game_id, player1_score=p1_score, player2_score=p2_score)
+
+    # Write round to DB (using picker's total points)
+    round_row = db.get_round(game_id, round_num)
+    if round_row:
+        dev = abs(guesser_guess - actual_fee) / actual_fee * 100 if actual_fee else 0
+        db.update_round(
+            round_row["id"],
+            guess_amount=guesser_guess,
+            accuracy_percent=round(dev, 2),
+            accuracy_tier=guesser_tier,
+            points_earned=final_guesser_points,
+            hints_used=0,
+            hint_types=[],
+            completed=True,
+        )
+
+    # Send results to both players
+    msg_picker = (
+        f"⚔️ *Раунд обмена — итог*\n\n"
+        f"👤 *{_esc(player_name)}*\n"
+        f"✅ Цена: *{_esc(format_fee(actual_fee))}*\n\n"
+        f"Твой ответ: *{_esc(format_fee(guess))}* → *\\+{points_p}* очков\n"
+        f"Соперник: *{_esc(format_fee(guesser_guess))}* → *\\+{final_guesser_points}* очков\n"
+        f"{_esc(outcome_picker)}"
+    )
+    msg_guesser = (
+        f"⚔️ *Раунд обмена — итог*\n\n"
+        f"👤 *{_esc(player_name)}*\n"
+        f"✅ Цена: *{_esc(format_fee(actual_fee))}*\n\n"
+        f"Твой ответ: *{_esc(format_fee(guesser_guess))}* → *\\+{final_guesser_points}* очков\n"
+        f"Соперник: *{_esc(format_fee(guess))}* → *\\+{points_p}* очков\n"
+        f"{_esc(outcome_guesser)}"
+    )
+
+    await update.message.reply_text(msg_picker, parse_mode=ParseMode.MARKDOWN_V2)
+    if guesser_id_ref:
+        try:
+            await ctx.bot.send_message(guesser_id_ref, msg_guesser, parse_mode=ParseMode.MARKDOWN_V2)
+        except TelegramError:
+            pass
+
+    # Advance round: picker was the "picker" in the original round
+    # After exchange, the new picker is the guesser (roles swap)
+    picker_action_now, picker_data_now = await get_state(user_id)
+    await clear_state(user_id)
+    if guesser_id_ref:
+        await clear_state(guesser_id_ref)
+
+    next_round = round_num + 1
+    _derby_total_ex = data.get("derby_total_rounds", TOTAL_ROUNDS)
+    if next_round > _derby_total_ex:
+        await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
+    else:
+        # After exchange: the guesser (who answered first) becomes new picker
+        # The picker (who just answered) becomes new guesser
+        # We need to reconstruct guesser_data from what we have in data
+        guesser_data_adv = {
+            "derby_level": data.get("derby_level", 1),
+            "derby_name": data.get("derby_name", ""),
+            "derby_total_rounds": data.get("derby_total_rounds", TOTAL_ROUNDS),
+            "derby_my_club": data.get("derby_opp_club", ""),   # guesser's club (stored as opp in picker data)
+            "derby_opp_club": data.get("derby_my_club", ""),
+            "derby_specials": data.get("derby_specials", {}),
+            "ultras_range_used": False,
+            "legend_sc_used": False,
+        }
+        await _advance_round(
+            ctx,
+            game_id=game_id,
+            round_num=round_num,
+            new_picker_id=guesser_id_ref or user_id,
+            new_guesser_id=user_id,
+            p1_id=p1_id,
+            p2_id=p2_id,
+            p1_score=p1_score,
+            p2_score=p2_score,
+            guesser_id=guesser_id_ref or user_id,
+            picker_id=user_id,
+            guesser_data=guesser_data_adv,
             picker_action=picker_action_now or "",
             picker_data=picker_data_now or {},
         )
@@ -2822,7 +3448,8 @@ async def cb_reverse_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     await clear_state(user_id)
 
     next_round = round_num + 1
-    if next_round > TOTAL_ROUNDS:
+    _derby_total_rev = data.get("derby_total_rounds", TOTAL_ROUNDS)
+    if next_round > _derby_total_rev:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
     else:
         await _advance_round(
@@ -3372,6 +3999,7 @@ async def cb_game_surrender(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     valid_states = (
         "guessing", "waiting_for_guess", "waiting_for_pick",
         "picking_league", "picking_club", "picking_transfer",
+        "exchange_waiting", "exchange_guessing_picker",
     )
     if action not in valid_states:
         await q.answer("У тебя нет активной игры.", show_alert=True)
@@ -4968,6 +5596,7 @@ def create_application() -> Application:
         ("^menu_leaderboard$",    cb_menu_leaderboard),
         ("^menu_help$",           cb_menu_help),
         ("^help_fanclubs$",       cb_help_fanclubs),
+        ("^help_derby$",          cb_help_derby),
         ("^help_rules$",          cb_help_rules),
         ("^menu_back$",           cb_menu_back),
         # Play
