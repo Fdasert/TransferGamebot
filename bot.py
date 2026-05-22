@@ -623,26 +623,73 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _send_help(update.message)
 
 
+def _help_rules_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏟 Фан клубы", callback_data="help_fanclubs")],
+        [InlineKeyboardButton("← В меню", callback_data="menu_back")],
+    ])
+
+
+def _help_fanclubs_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("← Правила", callback_data="help_rules")],
+        [InlineKeyboardButton("← В меню", callback_data="menu_back")],
+    ])
+
+
+HELP_RULES_TEXT = (
+    "*Transfer Guesser — правила*\n\n"
+    "🎮 *Формат:* 1vs1, 6 раундов \\(по 3 для каждого\\)\n\n"
+    "*Раунд:*\n"
+    "• Выбирающий выбирает лигу → клуб → трансфер\n"
+    "• Угадывающий видит имя игрока и пытается угадать сумму\n\n"
+    "*Очки за точность:*\n"
+    "🎯 Точное попадание — 10 очков\n"
+    "🔥 В пределах 5% — 8 очков\n"
+    "👍 В пределах 10% — 6 очков\n"
+    "😅 В пределах 20% — 4 очка\n"
+    "❌ Мимо — 0 очков\n\n"
+    "*Подсказки \\(макс\\. 2\\):*\n"
+    "Каждая подсказка снижает очки на 1\n\n"
+    "*Ввод суммы:* числом в евро, например:\n"
+    "`45M` или `45000000` или `500K`\n\n"
+    "*ELO:* первые 10 игр — калибровка\\. Рейтинг начисляется после\\.\n\n"
+    "⚡ *Особый раунд \\(5% шанс\\):*\n"
+    "Иногда вместо суммы нужно угадать нацию, возраст или клуб игрока — сумма трансфера при этом известна\\!"
+)
+
+HELP_FANCLUBS_TEXT = (
+    "*🏟 Фан клубы*\n\n"
+    "Угадывай трансферы — прокачивай преданность любимому клубу\\!\n\n"
+    "*Как работает:*\n"
+    "Каждое угаданное задание с трансфером любого клуба добавляет \\+1 к его счётчику\\. "
+    "Угадай 5 трансферов одного клуба — он разблокируется в *Зале болельщика*\\.\n\n"
+    "*Как выбрать фан\\-клуб:*\n"
+    "Профиль → 🏟 Зал болельщика → выбери клуб из разблокированных\\.\n\n"
+    "*Уровни преданности:*\n\n"
+    "💚 *Болельщик* — от 5 угаданных\n"
+    "└ \\+15 монет за каждый угаданный трансфер клуба\n\n"
+    "⭐ *Фанат* — от 15 угаданных\n"
+    "└ \\+20 монет за каждый угаданный трансфер клуба\n\n"
+    "🔥 *Ультрас* — от 30 угаданных\n"
+    "└ \\+30 монет за каждый угаданный трансфер клуба\n"
+    "└ 🔥 *Способность:* один раз за игру — если тебе загадали трансфер твоего клуба, "
+    "можешь узнать диапазон цены \\(±25%\\) перед угадыванием\n\n"
+    "🏆 *Легенда* — от 50 угаданных\n"
+    "└ \\+50 монет за каждый угаданный трансфер клуба\n"
+    "└ 🔥 *Диапазон цены* \\(как у Ультраса\\)\n"
+    "└ 🎯 *Второй шанс:* если не угадал — можешь попробовать ещё раз\\. "
+    "Правильная цена при этом скрыта, засчитывается лучший из двух ответов\n\n"
+    "_Способности работают только для трансферов своего фан\\-клуба, один раз за игру_"
+)
+
+
 async def _send_help(msg: Message) -> None:
-    text = (
-        "*Transfer Guesser — правила*\n\n"
-        "🎮 *Формат:* 1vs1, 6 раундов \\(по 3 для каждого\\)\n\n"
-        "*Раунд:*\n"
-        "• Выбирающий выбирает лигу → клуб → трансфер\n"
-        "• Угадывающий видит имя игрока и пытается угадать сумму\n\n"
-        "*Очки за точность:*\n"
-        "🎯 Точное попадание — 10 очков\n"
-        "🔥 В пределах 5% — 8 очков\n"
-        "👍 В пределах 10% — 6 очков\n"
-        "😅 В пределах 20% — 4 очка\n"
-        "❌ Мимо — 0 очков\n\n"
-        "*Подсказки \\(макс\\. 2\\):*\n"
-        "Каждая подсказка снижает очки на 1\n\n"
-        "*Ввод суммы:* числом в евро, например:\n"
-        "`45M` или `45000000` или `500K`\n\n"
-        "*ELO:* первые 10 игр — калибровка\\. Рейтинг начисляется после\\."
+    await msg.reply_text(
+        HELP_RULES_TEXT,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_help_rules_kb(),
     )
-    await msg.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=back_kb())
 
 
 # ── Menu callbacks ────────────────────────────────────────────────────────────
@@ -1183,7 +1230,31 @@ async def cb_menu_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 async def cb_menu_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
-    await _send_help(q.message)
+    await q.edit_message_text(
+        HELP_RULES_TEXT,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_help_rules_kb(),
+    )
+
+
+async def cb_help_fanclubs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        HELP_FANCLUBS_TEXT,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_help_fanclubs_kb(),
+    )
+
+
+async def cb_help_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        HELP_RULES_TEXT,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_help_rules_kb(),
+    )
 
 
 async def cb_menu_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4896,6 +4967,8 @@ def create_application() -> Application:
         ("^taunt_gcancel_",       cb_taunt_game_cancel),
         ("^menu_leaderboard$",    cb_menu_leaderboard),
         ("^menu_help$",           cb_menu_help),
+        ("^help_fanclubs$",       cb_help_fanclubs),
+        ("^help_rules$",          cb_help_rules),
         ("^menu_back$",           cb_menu_back),
         # Play
         ("^play_challenge$",      cb_play_challenge),
