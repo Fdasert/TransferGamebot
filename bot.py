@@ -26,6 +26,7 @@ from telegram.error import TelegramError
 import database as db
 import casino as casino_module
 import fut as fut_module
+from patch_notes import PATCH_NOTES
 from club_emblems import CLUB_EMBLEMS, club_emblem_html, has_emblem
 from scoring import calculate_points, calculate_elo, calculate_placement_rating, format_fee, parse_fee_input
 from config import (
@@ -52,6 +53,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Bot version ───────────────────────────────────────────────────────────────
+BOT_VERSION = "v1.4"
 
 # ── Derby definitions ─────────────────────────────────────────────────────────
 
@@ -301,6 +304,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("❓ Помощь", callback_data="menu_help")],
         [InlineKeyboardButton("🎰 Казино", callback_data="casino_menu"),
          InlineKeyboardButton("⚽ FUT Клуб", callback_data="fut_menu")],
+        [InlineKeyboardButton("📋 Патчноуты", callback_data="patch_notes")],
     ])
 
 
@@ -625,6 +629,25 @@ async def clear_state(user_id: int) -> None:
 
 # ── /start ────────────────────────────────────────────────────────────────────
 
+async def _maybe_notify_update(user_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a one-time update notification if user hasn't seen the latest patch."""
+    user = db.get_user(user_id)
+    if not user:
+        return
+    if user.get("last_seen_patch") == BOT_VERSION:
+        return
+    db.update_user(user_id, last_seen_patch=BOT_VERSION)
+    try:
+        await ctx.bot.send_message(
+            user_id,
+            f"🆕 *Вышло обновление {_esc(BOT_VERSION)}\\!*\n\n"
+            f"Нажми 📋 *Патчноуты* в меню чтобы узнать что нового\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    except TelegramError:
+        pass
+
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     username = update.effective_user.username
@@ -634,6 +657,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # Refresh username in case it changed
         if existing.get("username") != username:
             db.update_user(user_id, username=username)
+        await _maybe_notify_update(user_id, ctx)
         await update.message.reply_text(
             f"С возвращением, *{_esc(existing['display_name'])}*\\! 👋",
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -673,6 +697,7 @@ def _help_rules_kb() -> InlineKeyboardMarkup:
 
 def _help_fanclubs_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Смена клуба", callback_data="help_club_switch")],
         [InlineKeyboardButton("← Правила", callback_data="help_rules")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
@@ -683,6 +708,36 @@ def _help_derby_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("← Правила", callback_data="help_rules")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
+
+
+def _help_club_switch_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("← Фан клубы", callback_data="help_fanclubs")],
+        [InlineKeyboardButton("← В меню", callback_data="menu_back")],
+    ])
+
+
+def _patch_notes_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("← В меню", callback_data="menu_back")],
+    ])
+
+
+def _format_patch_notes() -> str:
+    """Format PATCH_NOTES list into MarkdownV2 text."""
+    lines: list[str] = ["📋 *Патчноуты Transfer Guesser*\n"]
+    for i, entry in enumerate(PATCH_NOTES):
+        is_latest = i == 0
+        prefix = "🆕 " if is_latest else ""
+        version = _esc(entry["version"])
+        title = _esc(entry["title"])
+        emoji = entry["emoji"]
+        lines.append(f"{prefix}{emoji} *{version} — {title}*")
+        for change in entry["changes"]:
+            lines.append(f"  • {_esc(change)}")
+        if i < len(PATCH_NOTES) - 1:
+            lines.append("")
+    return "\n".join(lines)
 
 
 HELP_RULES_TEXT = (
@@ -748,6 +803,29 @@ HELP_DERBY_TEXT = (
     "🕵️ *Слепой раунд* — имя игрока скрыто, угадываешь только по клубу и сезону\n\n"
     "🔄 *Раунд обмена* — система выбирает трансфер автоматически\\. Оба игрока угадывают по очереди \\(пикер не видит цену\\)\\. "
     "Тот, кто угадал точнее, получает бонус \\+5 очков"
+)
+
+
+HELP_CLUB_SWITCH_TEXT = (
+    "*🔄 Смена клуба*\n\n"
+    "Сменить фан\\-клуб можно в Зале болельщика\\. Но это не бесплатно\\.\n\n"
+    "*💰 Стоимость смены:*\n"
+    "Зависит от уровня лояльности — чем выше уровень, тем дороже уйти\\.\n\n"
+    "*📉 Потеря лояльности:*\n"
+    "При каждой измене текущая лояльность делится на 2\\. "
+    "Легенда становится Ультрасом, Ультрас — Фанатом и т\\.д\\.\n\n"
+    "*⏳ Клеймо перебежчика \\(7 дней\\):*\n"
+    "Если переходишь к историческому сопернику \\(Реал↔Барса, МЮ↔МС и др\\.\\) "
+    "— получаешь клеймо на 7 дней видимое всем\\. "
+    "Повторная измена обновляет таймер\\.\n\n"
+    "*🐍 Титулы за повторные измены во время искупления:*\n"
+    "🐍 *Иуда* — первая повторная измена \\(×2 трансферов для искупления\\)\n"
+    "🐀 *Крыса* — вторая повторная измена \\(×2 снова\\)\n"
+    "☠️ *Анафема* — третья и далее\n\n"
+    "*🔄 Путь искупления \\(вернулся в свой клуб\\):*\n"
+    "Угадывай трансферы родного клуба — метка постепенно снимается\\:\n"
+    "😔 *Блудный сын* → 🤍 *Кающийся* → 🕊️ *Прощённый* → ✨ чисто\n\n"
+    "_История переходов сохраняется в профиле даже после искупления_"
 )
 
 
@@ -1331,6 +1409,26 @@ async def cb_help_derby(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         HELP_DERBY_TEXT,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=_help_derby_kb(),
+    )
+
+
+async def cb_help_club_switch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        HELP_CLUB_SWITCH_TEXT,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_help_club_switch_kb(),
+    )
+
+
+async def cb_patch_notes(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        _format_patch_notes(),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=_patch_notes_kb(),
     )
 
 
@@ -2365,6 +2463,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip()
     action, data = await get_state(user_id)
 
+    # One-time update notification (skip during registration to avoid interrupting flow)
+    if action != "registering":
+        await _maybe_notify_update(user_id, ctx)
+
     if action == "registering":
         await _handle_registration(update, text)
     elif action == "guessing":
@@ -2717,8 +2819,13 @@ async def _handle_guess(
     # ── Second-chance (Легенда) second guess path ────────────────────────────
     if data.get("sc_pending"):
         tier2, points2 = calculate_points(guess, actual_fee, hints_used)
+        _derby_lvl_sc = data.get("derby_level", 0)
+        if _derby_lvl_sc == 1:
+            points2 = points2 * 2
+        elif _derby_lvl_sc == 2:
+            points2 = int(points2 * 1.5)
         sc_first = data.get("sc_first_data", {})
-        points1 = sc_first.get("points", 0)
+        points1 = sc_first.get("points", 0)  # already multiplied when stored
         tier1 = sc_first.get("tier", "miss")
 
         # Use the better result
@@ -2823,6 +2930,13 @@ async def _handle_guess(
 
     # ── Exchange round: guesser answered first ────────────────────────────────
     if data.get("is_exchange_guesser"):
+        # Guard: if guesser already answered, ignore duplicate messages
+        if data.get("exchange_answered"):
+            await update.message.reply_text(
+                "⏳ Ответ уже принят\\. Ждём соперника\\.\\.\\.",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            return
         # Save guesser result into picker's exchange_waiting state
         picker_id_ex = data["picker_id"]
         _, picker_ex_data = await get_state(picker_id_ex)
@@ -5598,6 +5712,8 @@ def create_application() -> Application:
         ("^help_fanclubs$",       cb_help_fanclubs),
         ("^help_derby$",          cb_help_derby),
         ("^help_rules$",          cb_help_rules),
+        ("^help_club_switch$",    cb_help_club_switch),
+        ("^patch_notes$",         cb_patch_notes),
         ("^menu_back$",           cb_menu_back),
         # Play
         ("^play_challenge$",      cb_play_challenge),
