@@ -172,6 +172,14 @@ CLUB_LOYALTY_LEVELS: list[tuple[int, str, str, int]] = [
     (5,  "Болельщик", "💚", 15),
 ]
 
+# ── Reverse round config ───────────────────────────────────────────────────────
+# attr → {label, points, text_input}
+REVERSE_ATTRS: dict[str, dict] = {
+    "nationality": {"label": "🌍 Национальность", "points": 3, "text_input": False},
+    "from_club":   {"label": "🏟 Откуда пришёл",   "points": 5, "text_input": False},
+    "age":         {"label": "🎂 Возраст",           "points": 5, "text_input": True},
+}
+
 # ── Difficulty settings ───────────────────────────────────────────────────────
 
 DIFFICULTY: dict[str, dict] = {
@@ -1589,6 +1597,83 @@ async def cb_pick_league_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     await q.edit_message_text("Выбери лигу:", reply_markup=leagues_kb(game_id=data.get("game_id")))
 
 
+def _build_reverse_round(transfer: dict) -> dict | None:
+    """Try to build reverse round data. Returns extra state fields or None if impossible."""
+    available = []
+    if transfer.get("nationality"):
+        available.append("nationality")
+    if transfer.get("from_club"):
+        available.append("from_club")
+    if transfer.get("age"):
+        available.append("age")
+    if not available:
+        return None
+
+    attr = random.choice(available)
+    correct = str(transfer[attr])
+
+    if REVERSE_ATTRS[attr]["text_input"]:
+        # Age — no distractors needed
+        return {"is_reverse": True, "reverse_attr": attr, "reverse_correct": correct}
+
+    pool = db.get_distractor_values(attr, correct)
+    pool = [x for x in pool if x and x != correct]
+    if len(pool) < 3:
+        return None  # Not enough distractors — fall back to normal round
+
+    distractors = random.sample(pool, 3)
+    options = distractors + [correct]
+    random.shuffle(options)
+    return {
+        "is_reverse": True,
+        "reverse_attr": attr,
+        "reverse_correct": correct,
+        "reverse_options": options,
+        "reverse_correct_idx": options.index(correct),
+    }
+
+
+async def _send_reverse_prompt(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    guesser_id: int,
+    transfer: dict,
+    round_num: int,
+    picker_name: str,
+    attr: str,
+    options: list[str] | None = None,
+) -> None:
+    attr_label = REVERSE_ATTRS[attr]["label"]
+    fee_str = format_fee(transfer["transfer_fee"])
+    player_name = transfer["player_name"]
+
+    text = (
+        f"⚡ *ОСОБЫЙ РАУНД\\!*\n\n"
+        f"⚽ Раунд *{round_num}/{TOTAL_ROUNDS}*\n"
+        f"Трансфер от *{_esc(picker_name)}*\n\n"
+        f"👤 Игрок: *{_esc(player_name)}*\n"
+        f"💰 Сумма трансфера: *{_esc(fee_str)}*\n\n"
+        f"❓ Угадай — {_esc(attr_label)}\\:\n"
+    )
+
+    if REVERSE_ATTRS[attr]["text_input"]:
+        text += "_Введи возраст числом:_"
+        await ctx.bot.send_message(guesser_id, text, parse_mode=ParseMode.MARKDOWN_V2)
+    else:
+        text += "_Выбери правильный ответ:_"
+        opts = options or []
+        buttons = [
+            [InlineKeyboardButton(opts[0], callback_data="rev_ans_0"),
+             InlineKeyboardButton(opts[1], callback_data="rev_ans_1")],
+            [InlineKeyboardButton(opts[2], callback_data="rev_ans_2"),
+             InlineKeyboardButton(opts[3], callback_data="rev_ans_3")],
+        ]
+        await ctx.bot.send_message(
+            guesser_id, text,
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+
 async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -1627,8 +1712,15 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     guesser_ultras_used = (guesser_wait_data or {}).get("ultras_range_used", False)
     guesser_sc_used = (guesser_wait_data or {}).get("legend_sc_used", False)
 
-    # Send guesser their task
-    await set_state(opponent_id, "guessing", {
+    # ── 5% chance of a reverse round ─────────────────────────────────────────
+    reverse_extra: dict = {}
+    if random.random() < 0.05:
+        result = _build_reverse_round(transfer)
+        if result:
+            reverse_extra = result
+
+    # Build guesser state
+    guesser_state: dict = {
         "game_id": game_id,
         "round_num": round_num,
         "transfer_id": transfer_id,
@@ -1640,38 +1732,59 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         "transfer_club_id": str(transfer.get("club_id", "") or ""),
         "ultras_range_used": guesser_ultras_used,
         "legend_sc_used": guesser_sc_used,
-    })
+    }
+    if reverse_extra:
+        guesser_state.update(reverse_extra)
+
+    await set_state(opponent_id, "guessing", guesser_state)
 
     picker = db.get_user(user_id)
     picker_name = picker["display_name"] if picker else "Соперник"
-
     picker_phrases = db.get_user_cosmetics(user_id, "phrase")
     picker_kb_rows = []
     if picker_phrases:
         picker_kb_rows.append([InlineKeyboardButton("💬 Тизер", callback_data=f"taunt_game_{opponent_id}")])
     picker_kb_rows.append([InlineKeyboardButton("🏳 Сдаться", callback_data=f"game_surrender_{game_id}")])
     picker_wait_kb = InlineKeyboardMarkup(picker_kb_rows)
-    await q.edit_message_text(
-        f"✅ Трансфер выбран\\!\n\n"
-        f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
-        f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
-        f"Ждём ответа соперника\\.\\.\\.",
-        parse_mode=ParseMode.MARKDOWN_V2,
-        reply_markup=picker_wait_kb,
-    )
 
     game = db.get_game(game_id)
     p1_score = game["player1_score"]
     p2_score = game["player2_score"]
 
-    guesser_user_obj = db.get_user(opponent_id)
-    await _send_guess_prompt(
-        ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name,
-        picker_id=user_id, game_id=game_id,
-        transfer_club_id=str(transfer.get("club_id", "") or ""),
-        guesser_user=guesser_user_obj,
-        ultras_range_used=guesser_ultras_used,
-    )
+    if reverse_extra:
+        attr = reverse_extra["reverse_attr"]
+        attr_label = REVERSE_ATTRS[attr]["label"]
+        await q.edit_message_text(
+            f"⚡ *Особый раунд\\!*\n\n"
+            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
+            f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
+            f"❓ Соперник угадывает: *{_esc(attr_label)}*\n\n"
+            f"Ждём ответа соперника\\.\\.\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=picker_wait_kb,
+        )
+        await _send_reverse_prompt(
+            ctx, opponent_id, transfer, round_num, picker_name,
+            attr=attr,
+            options=reverse_extra.get("reverse_options"),
+        )
+    else:
+        await q.edit_message_text(
+            f"✅ Трансфер выбран\\!\n\n"
+            f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
+            f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
+            f"Ждём ответа соперника\\.\\.\\.",
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=picker_wait_kb,
+        )
+        guesser_user_obj = db.get_user(opponent_id)
+        await _send_guess_prompt(
+            ctx, opponent_id, transfer, round_num, 0, [], p1_score, p2_score, picker_name,
+            picker_id=user_id, game_id=game_id,
+            transfer_club_id=str(transfer.get("club_id", "") or ""),
+            guesser_user=guesser_user_obj,
+            ultras_range_used=guesser_ultras_used,
+        )
 
 
 async def _send_guess_prompt(
@@ -1977,6 +2090,103 @@ async def _advance_round(
     )
 
 
+async def _handle_reverse_age(
+    update: Update,
+    ctx: ContextTypes.DEFAULT_TYPE,
+    guessed_age: int,
+    data: dict,
+) -> None:
+    """Handle text input for a reverse round where attr=age."""
+    user_id = update.effective_user.id
+    correct_age = int(data["reverse_correct"])
+    diff = abs(guessed_age - correct_age)
+
+    if diff == 0:
+        points, tier_msg = 5, "🎯 Точно\\!"
+    elif diff == 1:
+        points, tier_msg = 3, "🔥 Рядом\\!"
+    elif diff <= 2:
+        points, tier_msg = 1, "😅 Почти\\!"
+    else:
+        points, tier_msg = 0, "❌ Мимо\\!"
+
+    game_id    = data["game_id"]
+    round_num  = data["round_num"]
+    picker_id  = data["picker_id"]
+    player_name = data["player_name"]
+    actual_fee  = data["actual_fee"]
+
+    round_row = db.get_round(game_id, round_num)
+    if round_row:
+        db.update_round(
+            round_row["id"],
+            guess_amount=guessed_age,
+            accuracy_tier="exact" if diff == 0 else ("close" if diff <= 2 else "miss"),
+            points_earned=points,
+            hints_used=0,
+            hint_types=[],
+            completed=True,
+        )
+
+    game   = db.get_game(game_id)
+    p1_id  = game["player1_id"]
+    p2_id  = game["player2_id"]
+    p1_score = game["player1_score"]
+    p2_score = game["player2_score"]
+    if user_id == p1_id:
+        p1_score += points
+    else:
+        p2_score += points
+    db.update_game(game_id, player1_score=p1_score, player2_score=p2_score)
+
+    card = (
+        f"{tier_msg}\n\n"
+        f"👤 *{_esc(player_name)}*\n"
+        f"💰 Сумма: *{_esc(format_fee(actual_fee))}*\n"
+        f"🎂 Возраст: *{correct_age}*\n"
+        f"🎯 Твой ответ: *{guessed_age}*\n"
+        f"📊 Очки: *\\+{points}*"
+    )
+    await update.message.reply_text(card, parse_mode=ParseMode.MARKDOWN_V2)
+    try:
+        await ctx.bot.send_message(
+            picker_id,
+            f"{tier_msg}\n\n"
+            f"👤 *{_esc(player_name)}*\n"
+            f"💰 Сумма: *{_esc(format_fee(actual_fee))}*\n"
+            f"🎂 Возраст соперника: *{correct_age}*\n"
+            f"🎯 Ответ соперника: *{guessed_age}*\n"
+            f"📊 Очки: *\\+{points}*",
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
+    except TelegramError:
+        pass
+
+    picker_action_now, picker_data_now = await get_state(picker_id)
+    await clear_state(user_id)
+
+    next_round = round_num + 1
+    if next_round > TOTAL_ROUNDS:
+        await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
+    else:
+        await _advance_round(
+            ctx,
+            game_id=game_id,
+            round_num=round_num,
+            new_picker_id=user_id,
+            new_guesser_id=picker_id,
+            p1_id=p1_id,
+            p2_id=p2_id,
+            p1_score=p1_score,
+            p2_score=p2_score,
+            guesser_id=user_id,
+            picker_id=picker_id,
+            guesser_data=data,
+            picker_action=picker_action_now or "",
+            picker_data=picker_data_now or {},
+        )
+
+
 async def _handle_guess(
     update: Update,
     ctx: ContextTypes.DEFAULT_TYPE,
@@ -1984,6 +2194,29 @@ async def _handle_guess(
     data: dict,
 ) -> None:
     user_id = update.effective_user.id
+
+    # ── Reverse round intercept ───────────────────────────────────────────────
+    if data.get("is_reverse"):
+        attr = data.get("reverse_attr", "")
+        if attr == "age":
+            try:
+                guessed_age = int(text.strip())
+                if not (10 <= guessed_age <= 50):
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text(
+                    "Введи возраст числом, например: *27*",
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                return
+            await _handle_reverse_age(update, ctx, guessed_age, data)
+        else:
+            await update.message.reply_text(
+                "⬆️ Выбери ответ кнопкой выше",
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+        return
+
     guess = parse_fee_input(text)
     if guess is None:
         await update.message.reply_text(
@@ -2408,6 +2641,115 @@ async def cb_sc_skip(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await clear_state(user_id)
 
     # Advance to next round or finish
+    next_round = round_num + 1
+    if next_round > TOTAL_ROUNDS:
+        await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
+    else:
+        await _advance_round(
+            ctx,
+            game_id=game_id,
+            round_num=round_num,
+            new_picker_id=user_id,
+            new_guesser_id=picker_id,
+            p1_id=p1_id,
+            p2_id=p2_id,
+            p1_score=p1_score,
+            p2_score=p2_score,
+            guesser_id=user_id,
+            picker_id=picker_id,
+            guesser_data=data,
+            picker_action=picker_action_now or "",
+            picker_data=picker_data_now or {},
+        )
+
+
+# ── Reverse round answer callback ─────────────────────────────────────────────
+
+async def cb_reverse_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """rev_ans_<0-3> — guesser picked one of the 4 MC options in a reverse round."""
+    q = update.callback_query
+    user_id = q.from_user.id
+    action, data = await get_state(user_id)
+
+    if action != "guessing" or not data.get("is_reverse"):
+        await q.answer("Сейчас не твоя очередь.", show_alert=True)
+        return
+
+    attr = data.get("reverse_attr", "")
+    if REVERSE_ATTRS.get(attr, {}).get("text_input"):
+        await q.answer("Введи ответ числом в чат.", show_alert=True)
+        return
+
+    idx = int(q.data[len("rev_ans_"):])
+    options = data.get("reverse_options", [])
+    correct_idx = data.get("reverse_correct_idx", -1)
+    correct = data["reverse_correct"]
+
+    if idx >= len(options):
+        await q.answer()
+        return
+
+    chosen = options[idx]
+    is_correct = (idx == correct_idx)
+    points = REVERSE_ATTRS[attr]["points"] if is_correct else 0
+    attr_label = REVERSE_ATTRS[attr]["label"]
+    effect = "🎯 Точно\\!" if is_correct else "❌ Мимо\\!"
+
+    await q.answer("✅ Правильно!" if is_correct else "❌ Мимо!")
+    await q.edit_message_reply_markup(reply_markup=None)
+
+    game_id    = data["game_id"]
+    round_num  = data["round_num"]
+    picker_id  = data["picker_id"]
+    player_name = data["player_name"]
+    actual_fee  = data["actual_fee"]
+
+    # Write round to DB
+    round_row = db.get_round(game_id, round_num)
+    if round_row:
+        db.update_round(
+            round_row["id"],
+            guess_amount=0,
+            accuracy_tier="exact" if is_correct else "miss",
+            points_earned=points,
+            hints_used=0,
+            hint_types=[],
+            completed=True,
+        )
+
+    # Update scores
+    game   = db.get_game(game_id)
+    p1_id  = game["player1_id"]
+    p2_id  = game["player2_id"]
+    p1_score = game["player1_score"]
+    p2_score = game["player2_score"]
+    if user_id == p1_id:
+        p1_score += points
+    else:
+        p2_score += points
+    db.update_game(game_id, player1_score=p1_score, player2_score=p2_score)
+
+    # Result cards
+    def _rev_card(is_guesser: bool) -> str:
+        whose = "Твой ответ" if is_guesser else "Ответ соперника"
+        return (
+            f"{effect}\n\n"
+            f"👤 *{_esc(player_name)}*\n"
+            f"💰 Сумма: *{_esc(format_fee(actual_fee))}*\n"
+            f"{_esc(attr_label)}: *{_esc(correct)}*\n"
+            f"🎯 {whose}: *{_esc(chosen)}*\n"
+            f"📊 Очки: *\\+{points}*"
+        )
+
+    await q.message.reply_text(_rev_card(is_guesser=True), parse_mode=ParseMode.MARKDOWN_V2)
+    try:
+        await ctx.bot.send_message(picker_id, _rev_card(is_guesser=False), parse_mode=ParseMode.MARKDOWN_V2)
+    except TelegramError:
+        pass
+
+    picker_action_now, picker_data_now = await get_state(picker_id)
+    await clear_state(user_id)
+
     next_round = round_num + 1
     if next_round > TOTAL_ROUNDS:
         await _finish_game(ctx, game_id, p1_id, p2_id, p1_score, p2_score)
@@ -4499,6 +4841,7 @@ def create_application() -> Application:
         ("^ultras_range$",        cb_ultras_range),
         ("^sc_use$",              cb_sc_use),
         ("^sc_skip$",             cb_sc_skip),
+        ("^rev_ans_\\d$",         cb_reverse_answer),
         # Training
         ("^training_diff_",       cb_training_difficulty),
         ("^training_start$",      cb_training_start),

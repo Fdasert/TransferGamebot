@@ -128,6 +128,31 @@ def get_transfer(transfer_id: int) -> dict | None:
     return res.data[0] if res.data else None
 
 
+def get_distractor_values(field: str, exclude: str, pool_size: int = 80) -> list[str]:
+    """Return a deduplicated pool of values for `field` (excluding `exclude`) for use as MC distractors."""
+    allowed = {"nationality", "from_club"}
+    if field not in allowed:
+        return []
+    res = (
+        get_client()
+        .table("transfers")
+        .select(field)
+        .not_.is_(field, "null")
+        .neq(field, "")
+        .neq(field, exclude)
+        .limit(pool_size)
+        .execute()
+    )
+    seen: set[str] = set()
+    result: list[str] = []
+    for row in res.data or []:
+        val = (row.get(field) or "").strip()
+        if val and val not in seen:
+            seen.add(val)
+            result.append(val)
+    return result
+
+
 def upsert_transfer(data: dict) -> dict:
     res = (
         get_client()
