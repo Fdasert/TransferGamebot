@@ -1,7 +1,7 @@
 # TransferGameBot — шпаргалка для Claude
 
-> Актуально на: 2026-05-20  
-> Деплой: Railway (polling, не webhook). Пуш в git → Railway автодеплоит.  
+> Актуально на: 2026-05-23  
+> Деплой: Render (polling, не webhook). Пуш в git → Render автодеплоит.  
 > Запуск локально: `.\.venv\Scripts\python.exe bot.py`
 
 ---
