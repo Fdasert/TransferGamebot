@@ -54,7 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Bot version ───────────────────────────────────────────────────────────────
-BOT_VERSION = "v1.4"
+BOT_VERSION = "v1.5"
 
 # ── Derby definitions ─────────────────────────────────────────────────────────
 
@@ -691,6 +691,7 @@ def _help_rules_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🏟 Фан клубы", callback_data="help_fanclubs"),
          InlineKeyboardButton("⚔️ Дерби", callback_data="help_derby")],
+        [InlineKeyboardButton("🔄 Смена клуба", callback_data="help_club_switch")],
         [InlineKeyboardButton("← В меню", callback_data="menu_back")],
     ])
 
