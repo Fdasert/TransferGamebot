@@ -1719,6 +1719,9 @@ async def _start_game(
     game = db.create_game(first_id, second_id)
     game_id = game["game_id"]
 
+    # One random round per game is prestigious (×2 points)
+    prestigious_round = random.randint(1, derby_total_rounds)
+
     # Animate coin flip for both players
     coin_msg_a = await ctx.bot.send_message(a_id, "🪙 Подбрасываю монетку\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
     coin_msg_b = await ctx.bot.send_message(b_id, "🪙 Подбрасываю монетку\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
@@ -1798,6 +1801,7 @@ async def _start_game(
             "transfer_ids": [t["id"] for t in transfers],
             "ultras_range_used": False,
             "legend_sc_used": False,
+            "prestigious_round": prestigious_round,
             **derby_fields_first,
         })
         await set_state(second_id, "waiting_for_pick", {
@@ -1807,6 +1811,7 @@ async def _start_game(
             "opponent_id": first_id,
             "ultras_range_used": False,
             "legend_sc_used": False,
+            "prestigious_round": prestigious_round,
             **derby_fields_second,
         })
 
@@ -1830,6 +1835,7 @@ async def _start_game(
             "opponent_id": second_id,
             "ultras_range_used": False,
             "legend_sc_used": False,
+            "prestigious_round": prestigious_round,
             **derby_fields_first,
         })
         await set_state(second_id, "waiting_for_pick", {
@@ -1839,6 +1845,7 @@ async def _start_game(
             "opponent_id": first_id,
             "ultras_range_used": False,
             "legend_sc_used": False,
+            "prestigious_round": prestigious_round,
             **derby_fields_second,
         })
 
@@ -1938,19 +1945,29 @@ async def cb_pick_club(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cb_pick_league_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Back button from club list → league list."""
+    """Back button: from transfer list → club list, from club list → league list."""
     q = update.callback_query
     await q.answer()
     user_id = q.from_user.id
     action, data = await get_state(user_id)
     if action not in ("picking_club", "picking_transfer"):
         return
-    # In derby level 1, picker must stay within their club — no going back to leagues
+    # In derby level 1, picker must stay within their club — no going back
     if data.get("derby_level") == 1:
         await q.answer("⚔️ В дерби ты выбираешь только из своего клуба!", show_alert=True)
         return
-    await set_state(user_id, "picking_league", data)
-    await q.edit_message_text("Выбери лигу:", reply_markup=leagues_kb(game_id=data.get("game_id")))
+    if action == "picking_transfer":
+        # Go back to club list for the current league
+        league_id = data.get("league_id", "")
+        await set_state(user_id, "picking_club", data)
+        await q.edit_message_text(
+            "Выбери клуб:",
+            reply_markup=clubs_kb(league_id, game_id=data.get("game_id")),
+        )
+    else:
+        # Go back to league list
+        await set_state(user_id, "picking_league", data)
+        await q.edit_message_text("Выбери лигу:", reply_markup=leagues_kb(game_id=data.get("game_id")))
 
 
 def _build_reverse_round(transfer: dict) -> dict | None:
@@ -2066,6 +2083,10 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     # Check if this is an exchange round
     is_exchange = derby_special_type == "exchange"
 
+    # ── Prestigious round detection ───────────────────────────────────────────
+    prestigious_round = data.get("prestigious_round")
+    is_prestigious = (prestigious_round is not None and round_num == prestigious_round)
+
     # Switch picker to waiting (carry their ability flags from picking state)
     picker_wait_state: dict = {
         "game_id": game_id,
@@ -2079,6 +2100,7 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         "derby_my_club": derby_my_club,
         "derby_opp_club": derby_opp_club,
         "derby_specials": derby_specials,
+        "prestigious_round": prestigious_round,
     }
 
     # Carry guesser's ability flags from their waiting_for_pick state
@@ -2183,6 +2205,8 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         "derby_opp_club": guesser_derby_opp_club,
         "derby_specials": derby_specials,
         "derby_special_type": derby_special_type,
+        "prestigious_round": prestigious_round,
+        "is_prestigious": is_prestigious,
     }
     if reverse_extra:
         guesser_state.update(reverse_extra)
@@ -2209,9 +2233,11 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
         )
     else:
         is_blind = derby_special_type == "blind"
+        prestigious_suffix = "\n\n⭐ *ПРЕСТИЖНЫЙ РАУНД\\!* Очки ×2" if is_prestigious else ""
+        prestigious_suffix_html = "\n\n⭐ <b>ПРЕСТИЖНЫЙ РАУНД!</b> Очки ×2" if is_prestigious else ""
         if derby_level == 1 and not is_blind:
             await q.edit_message_text(
-                f"✅ Трансфер выбран!\n\n"
+                f"✅ Трансфер выбран!{prestigious_suffix_html}\n\n"
                 f"👤 Игрок: <b>{_hesc(transfer['player_name'])}</b>\n"
                 f"💰 Настоящая цена: <b>{_hesc(format_fee(transfer['transfer_fee']))}</b>\n\n"
                 f"Ждём ответа соперника...",
@@ -2220,7 +2246,7 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             )
         else:
             await q.edit_message_text(
-                f"✅ Трансфер выбран\\!\n\n"
+                f"✅ Трансфер выбран\\!{prestigious_suffix}\n\n"
                 f"👤 Игрок: *{_esc(transfer['player_name'])}*\n"
                 f"💰 Настоящая цена: *{_esc(format_fee(transfer['transfer_fee']))}*\n\n"
                 f"Ждём ответа соперника\\.\\.\\.",
@@ -2236,6 +2262,7 @@ async def cb_pick_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
             ultras_range_used=guesser_ultras_used,
             derby_level=derby_level,
             is_blind_round=is_blind,
+            is_prestigious=is_prestigious,
         )
 
 
@@ -2257,6 +2284,7 @@ async def _send_guess_prompt(
     derby_level: int = 0,
     is_blind_round: bool = False,
     is_exchange_round: bool = False,
+    is_prestigious: bool = False,
 ) -> None:
     # Derby level 1: no hints allowed
     if derby_level == 1:
@@ -2293,6 +2321,9 @@ async def _send_guess_prompt(
 
     if hint_lines:
         text += "\n" + "\n".join(hint_lines) + "\n"
+
+    if is_prestigious:
+        text += "\n⭐ *ПРЕСТИЖНЫЙ РАУНД\\!* Очки ×2\n"
 
     text += (
         f"\n💰 Назови сумму трансфера \\(в евро\\)\\:\n"
@@ -2573,6 +2604,8 @@ async def _advance_round(
         "derby_specials": derby_specials,
     }
 
+    prestigious_round = guesser_data.get("prestigious_round")
+
     my_score_picker = p1_score if new_picker_id == p1_id else p2_score
     opp_score_picker = p2_score if new_picker_id == p1_id else p1_score
     my_score_guesser = p1_score if new_guesser_id == p1_id else p2_score
@@ -2590,6 +2623,7 @@ async def _advance_round(
             "ultras_range_used": new_picker_ultras_used,
             "legend_sc_used": new_picker_sc_used,
             "club_id": new_picker_derby_club,
+            "prestigious_round": prestigious_round,
             **derby_fields_picker,
         }
         if special_type:
@@ -2602,6 +2636,7 @@ async def _advance_round(
             "opponent_id": new_picker_id,
             "ultras_range_used": new_guesser_ultras_used,
             "legend_sc_used": new_guesser_sc_used,
+            "prestigious_round": prestigious_round,
             **derby_fields_guesser,
         }
         if special_type:
@@ -2635,6 +2670,7 @@ async def _advance_round(
             "opponent_id": new_guesser_id,
             "ultras_range_used": new_picker_ultras_used,
             "legend_sc_used": new_picker_sc_used,
+            "prestigious_round": prestigious_round,
             **derby_fields_picker,
         })
         await set_state(new_guesser_id, "waiting_for_pick", {
@@ -2644,6 +2680,7 @@ async def _advance_round(
             "opponent_id": new_picker_id,
             "ultras_range_used": new_guesser_ultras_used,
             "legend_sc_used": new_guesser_sc_used,
+            "prestigious_round": prestigious_round,
             **derby_fields_guesser,
         })
 
@@ -2691,6 +2728,8 @@ async def _handle_reverse_age(
         points = points * 2
     elif derby_level_ra == 2:
         points = int(points * 1.5)
+    if data.get("is_prestigious"):
+        points = int(points * 1.5) if derby_level_ra > 0 else points * 2
 
     game_id    = data["game_id"]
     round_num  = data["round_num"]
@@ -2825,6 +2864,8 @@ async def _handle_guess(
             points2 = points2 * 2
         elif _derby_lvl_sc == 2:
             points2 = int(points2 * 1.5)
+        if data.get("is_prestigious"):
+            points2 = int(points2 * 1.5) if _derby_lvl_sc > 0 else points2 * 2
         sc_first = data.get("sc_first_data", {})
         points1 = sc_first.get("points", 0)  # already multiplied when stored
         tier1 = sc_first.get("tier", "miss")
@@ -2928,6 +2969,13 @@ async def _handle_guess(
         points = points * 2
     elif derby_level == 2:
         points = int(points * 1.5)
+
+    # ── Prestigious round multiplier (stacks on top of derby) ────────────────
+    if data.get("is_prestigious"):
+        if derby_level > 0:
+            points = int(points * 1.5)   # derby L1: ×2×1.5=×3 | L2: ×1.5×1.5=×2.25
+        else:
+            points = points * 2
 
     # ── Exchange round: guesser answered first ────────────────────────────────
     if data.get("is_exchange_guesser"):
@@ -3504,6 +3552,9 @@ async def cb_reverse_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
     chosen = options[idx]
     is_correct = (idx == correct_idx)
     points = REVERSE_ATTRS[attr]["points"] if is_correct else 0
+    # Prestigious round multiplier (reverse rounds disabled in derby, so no derby stacking)
+    if data.get("is_prestigious") and points > 0:
+        points = points * 2
     attr_label = REVERSE_ATTRS[attr]["label"]
     effect = "🎯 Точно\\!" if is_correct else "❌ Мимо\\!"
 
