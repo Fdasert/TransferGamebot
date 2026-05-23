@@ -1719,13 +1719,16 @@ async def _start_game(
     game = db.create_game(first_id, second_id)
     game_id = game["game_id"]
 
-    # One random round per game is prestigious (×2 points).
+    # 50% chance of a prestigious round per game (×2 points).
     # In derby level 1, exclude special rounds (7 & 8) to avoid conflicts.
-    _eligible = list(range(1, derby_total_rounds + 1))
-    if derby_level == 1 and derby_specials:
-        _special_nums = {int(k) for k in derby_specials.keys()}
-        _eligible = [r for r in _eligible if r not in _special_nums]
-    prestigious_round = random.choice(_eligible) if _eligible else None
+    if random.random() < 0.5:
+        _eligible = list(range(1, derby_total_rounds + 1))
+        if derby_level == 1 and derby_specials:
+            _special_nums = {int(k) for k in derby_specials.keys()}
+            _eligible = [r for r in _eligible if r not in _special_nums]
+        prestigious_round = random.choice(_eligible) if _eligible else None
+    else:
+        prestigious_round = None
 
     # Animate coin flip for both players
     coin_msg_a = await ctx.bot.send_message(a_id, "🪙 Подбрасываю монетку\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
