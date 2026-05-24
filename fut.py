@@ -2326,6 +2326,7 @@ async def _run_match_animation(
     #  Solo: Тактическая замена (~60')
     # ─────────────────────────────────────────────────────────────────────────
     async def _interactive_substitution(minute: int) -> int:
+        nonlocal live_my
         deficit = live_opp - live_my
         _pl = random.choice(_my_scorers)
         prompt = (
