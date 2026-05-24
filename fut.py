@@ -2365,7 +2365,7 @@ async def _run_match_animation(
         return bonus
 
     # ═════════════════════════════════════════════════════════════════════════
-    #  АНИМАЦИЯ МАТЧА — 8+ чекпоинтов
+    #  АНИМАЦИЯ МАТЧА — каждые 5 минут (0→5→10→...→90)
     #  Живой счёт: sim_goals_upto(minute) + int_my + int_opp (interactive)
     # ═════════════════════════════════════════════════════════════════════════
     moments    = shared_moments or []
@@ -2395,8 +2395,35 @@ async def _run_match_animation(
         bonus_total += b
         return b
 
-    # ── Чекпоинт 0: Стартовый свисток ────────────────────────────────────────
-    _star = random.choice(_real_names) if _real_names else None
+    def _atm(minute: int) -> str:
+        """Атмосферный комментарий в зависимости от счёта и стадии матча."""
+        if minute <= 30:
+            pool = _COMM_EARLY
+        elif minute <= 45:
+            pool = _COMM_EARLY if live_my == live_opp else (_COMM_LEADING if live_my > live_opp else _COMM_TRAILING)
+        elif minute <= 60:
+            pool = _COMM_SECOND_HALF
+        elif live_my > live_opp:
+            pool = _COMM_LEADING
+        elif live_opp > live_my:
+            pool = _COMM_TRAILING
+        else:
+            pool = _COMM_DRAW_LATE
+        return random.choice(pool)
+
+    async def _tick(minute: int, prev_minute: int) -> None:
+        """Стандартный 5-минутный чекпоинт."""
+        evs = [(m, t, e, tm) for m, t, e, tm in all_events if prev_minute < m <= minute]
+        _refresh_live(minute)
+        if evs:
+            await _show(f"⏱ *{minute}'*\n\n{_score_line()}\n\n{_evs_text(evs)}")
+            await asyncio.sleep(1.8)
+        else:
+            await _show(f"⏱ *{minute}'*\n\n{_score_line()}\n\n_{_atm(minute)}_")
+            await asyncio.sleep(1.0)
+
+    # ── Стартовый свисток ─────────────────────────────────────────────────────
+    _star   = random.choice(_real_names) if _real_names else None
     ko_line = f"_Все взоры на *{_star}* — главная звезда атаки!_" if _star else f"_{random.choice(_COMM_KICKOFF)}_"
     await _show(
         f"⚽ *Матч начинается!*\n\n"
@@ -2406,72 +2433,45 @@ async def _run_match_animation(
     )
     await asyncio.sleep(1.5)
 
-    # ── Чекпоинт 1: 1-й тайм — начало ───────────────────────────────────────
-    _refresh_live(0)
-    await _show(
-        f"⏱ *1-й тайм — 0:00*\n\n"
-        f"{_score_line()}\n\n"
-        f"_{random.choice(_COMM_EARLY)}_"
-    )
-    await asyncio.sleep(1.8)
+    # ── 1-й тайм: тики каждые 5' ─────────────────────────────────────────────
+    #  5' → 10' → 15' → [аут?] → 20' → 25' → 30'★ → 35' → [shared H1] → 40'
+    await _tick(5,  0)
+    await _tick(10, 5)
+    await _tick(15, 10)
 
-    # ── Чекпоинт 2: 1-й тайм — 15' ───────────────────────────────────────────
-    early15 = [(m, t, e, tm) for m, t, e, tm in h1_events if m <= 15]
-    _refresh_live(15)
-    _shown15 = _evs_text(early15) if early15 else f"_{random.choice(_COMM_EARLY)}_"
-    await _show(
-        f"⏱ *1-й тайм — 15:00*\n\n"
-        f"{_score_line()}\n\n"
-        f"{_shown15}"
-    )
-    await asyncio.sleep(1.8)
-
-    # ── Аут (соло, ~35% шанс перед 25') ──────────────────────────────────────
+    # Аут — соло (~35% шанс, 18–24')
     if do_throwin:
         bonus_total += await _interactive_throwin(random.randint(18, 24))
 
-    # ── Чекпоинт 3: 1-й тайм — 30' + shoutout ────────────────────────────────
-    early30 = [(m, t, e, tm) for m, t, e, tm in h1_events if 15 < m <= 30]
-    _refresh_live(30)
-    _shown30 = _evs_text(early30) if early30 else f"_{random.choice(_COMM_EARLY)}_"
-    _shout = ""
-    if _real_names:
-        _pl = random.choice(_real_names)
-        _shout = "\n" + random.choice([
-            f"⚡ *{_pl}* активно ищет голевой момент!",
-            f"🎯 *{_pl}* создаёт давление на оборону!",
-            f"🔥 *{_pl}* опасен в каждой атаке!",
-        ])
-    await _show(
-        f"⏱ *1-й тайм — 30:00*\n\n"
-        f"{_score_line()}\n\n"
-        f"{_shown30}{_shout}"
-    )
-    await asyncio.sleep(2.0)
+    await _tick(20, 15)
+    await _tick(25, 20)
 
-    # ── Shared интерактив первого тайма ───────────────────────────────────────
+    # 30' — особый тик со shoutout звезды
+    evs30 = [(m, t, e, tm) for m, t, e, tm in all_events if 25 < m <= 30]
+    _refresh_live(30)
+    _shown30 = _evs_text(evs30) if evs30 else f"_{random.choice(_COMM_EARLY)}_"
+    _shout30 = ""
+    if _real_names:
+        _pl30 = random.choice(_real_names)
+        _shout30 = "\n" + random.choice([
+            f"⚡ *{_pl30}* активно ищет голевой момент!",
+            f"🎯 *{_pl30}* создаёт давление на оборону!",
+            f"🔥 *{_pl30}* опасен в каждой атаке!",
+        ])
+    await _show(f"⏱ *30'*\n\n{_score_line()}\n\n{_shown30}{_shout30}")
+    await asyncio.sleep(1.8 if evs30 else 1.2)
+
+    await _tick(35, 30)
+
+    # Shared интерактив 1-го тайма (всегда)
     for m_cfg in h1_moments:
         await _run_shared(m_cfg)
 
-    # ── Чекпоинт 4: 1-й тайм — 42' (концовка тайма) ─────────────────────────
-    late_h1 = [(m, t, e, tm) for m, t, e, tm in h1_events if 30 < m <= 45]
-    _refresh_live(45)
-    if late_h1:
-        _shown42 = _evs_text(late_h1)
-        _tens = random.choice([
-            "_Заканчивается первый тайм — мяч неустанно в движении!_",
-            "_Напряжение нарастает — скоро перерыв!_",
-            "_Судья смотрит на часы — добавленное время близко!_",
-            "_Обе команды ищут гол до перерыва!_",
-        ])
-        await _show(
-            f"⏱ *1-й тайм — 42:00*\n\n"
-            f"{_score_line()}\n\n"
-            f"{_shown42}\n\n{_tens}"
-        )
-        await asyncio.sleep(1.8)
+    await _tick(40, 35)
 
-    # ── Чекпоинт 5: Перерыв — 45' + тактика (соло) ───────────────────────────
+    # ── Перерыв — 45' + тактика (всегда) ─────────────────────────────────────
+    evs_ht = [(m, t, e, tm) for m, t, e, tm in all_events if 40 < m <= 45]
+    _refresh_live(45)
     ht_my, ht_opp = live_my, live_opp
     if ht_my > ht_opp:
         ht_lead = f"\n🔵 *{my_name}* ведёт! " + random.choice(_COMM_LEADING)
@@ -2479,8 +2479,9 @@ async def _run_match_animation(
         ht_lead = f"\n🔴 *{opp_name}* ведёт! " + random.choice(_COMM_TRAILING)
     else:
         ht_lead = f"\n_{random.choice(_COMM_DRAW_LATE)}_"
+    ht_evs_txt = ("\n\n" + _evs_text(evs_ht)) if evs_ht else ""
     await _show(
-        f"🕐 *Перерыв — 45'*\n\n"
+        f"🕐 *Перерыв — 45'*{ht_evs_txt}\n\n"
         f"🔵 *{my_name}*  *{ht_my}* : *{ht_opp}*  🔴 *{opp_name}*{ht_lead}\n\n"
         f"📊 Владение 1-го тайма: *{poss_a}%* — *{poss_b}%*\n"
         f"_{random.choice(_COMM_HT)}_"
@@ -2488,76 +2489,64 @@ async def _run_match_animation(
     await asyncio.sleep(1.5)
     bonus_total += await _interactive_tactics(ht_my, ht_opp)
 
-    # ── Чекпоинт 6: 2-й тайм — старт ────────────────────────────────────────
+    # ── 2-й тайм: старт ──────────────────────────────────────────────────────
     sh_comm = random.choice(_COMM_SECOND_HALF)
     tension = f"_{my_name if ht_my > ht_opp else opp_name} ведёт! {sh_comm}_" if ht_my != ht_opp else f"_{sh_comm}_"
-    await _show(
-        f"⏱ *2-й тайм — 45:00*\n\n"
-        f"{_score_line()}\n\n"
-        f"{tension}"
-    )
+    _refresh_live(45)
+    await _show(f"⏱ *45' — 2-й тайм*\n\n{_score_line()}\n\n{tension}")
     await asyncio.sleep(1.8)
 
-    # ── Чекпоинт 7: 2-й тайм — 60' + замена (соло, ~65%) ────────────────────
-    mid2_evs = [(m, t, e, tm) for m, t, e, tm in h2_events if m <= 60]
-    _refresh_live(60)
-    if mid2_evs:
-        _shown60 = _evs_text(mid2_evs)
-        _sit = random.choice(_COMM_LEADING if live_my > live_opp else (_COMM_TRAILING if live_opp > live_my else _COMM_DRAW_LATE))
-        _mid_shout = ""
-        if _real_names and live_my <= live_opp:
-            _pl2 = random.choice(_real_names)
-            _mid_shout = f"\n🔥 *{_pl2}* рвётся к воротам!"
-        await _show(
-            f"⏱ *2-й тайм — 60:00*\n\n"
-            f"{_score_line()}\n\n"
-            f"{_shown60}\n\n_{_sit}_{_mid_shout}"
-        )
-        await asyncio.sleep(2.0)
+    # ── 2-й тайм: тики каждые 5' ─────────────────────────────────────────────
+    #  50' → 55' → 60' → [замена?] → 65' → [shared H2] → 70' → 75' → 80' → 85'★
+    await _tick(50, 45)
+    await _tick(55, 50)
+    await _tick(60, 55)
+
+    # Тактическая замена — соло (~65% шанс, 61–67')
     if do_sub:
-        # _interactive_substitution may increment live_my directly; track via int_my
         _lm_before = live_my
         bonus_total += await _interactive_substitution(random.randint(61, 67))
-        int_my += live_my - _lm_before  # sync int_my if substitution scored
+        int_my += live_my - _lm_before  # sync int_my если замена забила
 
-    # ── Shared интерактив второго тайма ──────────────────────────────────────
+    await _tick(65, 60)
+
+    # Shared интерактив 2-го тайма (всегда)
     for m_cfg in h2_moments:
         await _run_shared(m_cfg)
 
-    # ── Чекпоинт 8: 2-й тайм — 75' ──────────────────────────────────────────
-    mid75_evs = [(m, t, e, tm) for m, t, e, tm in h2_events if 60 < m <= 78]
-    _refresh_live(78)
-    if mid75_evs:
-        _shown75 = _evs_text(mid75_evs)
-        _tens75 = random.choice([
-            "_Матч входит в горячую фазу!_",
-            "_Каждая минута на вес золота!_",
-            "_Нервы на пределе у обеих команд!_",
-        ])
-        await _show(
-            f"⏱ *2-й тайм — 75:00*\n\n"
-            f"{_score_line()}\n\n"
-            f"{_shown75}\n\n{_tens75}"
-        )
-        await asyncio.sleep(1.8)
+    await _tick(70, 65)
+    await _tick(75, 70)
+    await _tick(80, 75)
 
-    # ── Чекпоинт 9: Горячая концовка — 85'+ ──────────────────────────────────
-    late2_evs = [(m, t, e, tm) for m, t, e, tm in h2_events if m > 78]
-    _refresh_live(99)  # all remaining simulation goals
-    if late2_evs:
-        _shown85 = _evs_text(late2_evs)
-        _climax  = random.choice(_COMM_CLIMAX)
-        _end_shout = ""
-        if live_my > live_opp and _real_names:
-            _end_shout = f"\n💪 *{random.choice(_real_names)}* закрывает игру!"
-        elif live_my < live_opp and _real_names:
-            _end_shout = f"\n🔥 *{random.choice(_real_names)}* ищет спасительный гол!"
+    # 85' — горячая концовка
+    evs85 = [(m, t, e, tm) for m, t, e, tm in all_events if 80 < m <= 85]
+    _refresh_live(85)
+    _climax   = random.choice(_COMM_CLIMAX)
+    _end_shout = ""
+    if live_my > live_opp and _real_names:
+        _end_shout = f"\n💪 *{random.choice(_real_names)}* закрывает игру!"
+    elif live_my < live_opp and _real_names:
+        _end_shout = f"\n🔥 *{random.choice(_real_names)}* ищет спасительный гол!"
+    _shown85 = _evs_text(evs85) if evs85 else f"_{_climax}_"
+    await _show(
+        f"🔥 *85' — Горячая концовка!*\n\n"
+        f"{_score_line()}\n\n"
+        f"{_shown85}"
+        + (f"\n\n{_climax}" if evs85 else "")
+        + _end_shout
+    )
+    await asyncio.sleep(1.8)
+
+    # 90' — добавленное время (показываем только если были события)
+    evs90 = [(m, t, e, tm) for m, t, e, tm in all_events if m > 85]
+    _refresh_live(99)  # все оставшиеся голы симуляции
+    if evs90:
         await _show(
-            f"🔥 *Горячая концовка!*\n\n"
+            f"⏰ *90' — Добавленное время!*\n\n"
             f"{_score_line()}\n\n"
-            f"{_shown85}\n\n{_climax}{_end_shout}"
+            f"{_evs_text(evs90)}"
         )
-        await asyncio.sleep(1.8)
+        await asyncio.sleep(1.5)
 
     # ── Финальный свисток ─────────────────────────────────────────────────────
     if live_my > live_opp:
