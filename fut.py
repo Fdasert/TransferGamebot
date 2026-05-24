@@ -749,6 +749,7 @@ async def cb_fut_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
              InlineKeyboardButton("⚔️ Матчи",       callback_data="fut_match")],
             [InlineKeyboardButton("🛒 Рынок",       callback_data="fut_market"),
              InlineKeyboardButton("🎲 Драфт",       callback_data="fut_draft")],
+            [InlineKeyboardButton("🔄 Обменник",    callback_data="fut_exchange_menu")],
             [InlineKeyboardButton("◀ В меню",       callback_data="menu_back")],
         ]),
     )
