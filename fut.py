@@ -1580,7 +1580,6 @@ def _simulate_match(sa: dict, sb: dict) -> dict:
         goal_prob = (att / max(att + def_, 1)) * (0.70 if is_penalty else GOAL_BASE * 2)
         r = random.random()
         name = random.choice(scorers)
-        side = "" if is_a else " *(соп)*"
         team = "a" if is_a else "b"
         if r < goal_prob:
             if is_a:
@@ -1588,17 +1587,17 @@ def _simulate_match(sa: dict, sb: dict) -> dict:
             else:
                 score_b += 1; shots_b += 1
             prefix = "🟡→⚽" if is_penalty else "⚽"
-            return (f"{prefix} *{minute}'* — *{name}*!{side}", "goal", team)
+            return (f"{prefix} *{minute}'* — *{name}*!", "goal", team)
         elif r < goal_prob + 0.28:
             if is_a: shots_a += 1
             else:    shots_b += 1
-            return (f"🧤 *{minute}'* — {name}: {random.choice(_SAVES)}{side}", "save", team)
+            return (f"🧤 *{minute}'* — {name}: {random.choice(_SAVES)}", "save", team)
         elif r < goal_prob + 0.50:
-            return (f"💨 *{minute}'* — {name}: {random.choice(_MISSES)}{side}", "miss", team)
+            return (f"💨 *{minute}'* — {name}: {random.choice(_MISSES)}", "miss", team)
         else:
             if is_a: corners_a += 1
             else:    corners_b += 1
-            return (f"🚩 *{minute}'* — Угловой{side}", "corner", team)
+            return (f"🚩 *{minute}'* — Угловой", "corner", team)
 
     for half in range(2):
         pen_minute_a = (random.randint(half * 45 + 10, half * 45 + 44)
@@ -1653,14 +1652,14 @@ def _simulate_match(sa: dict, sb: dict) -> dict:
                     if ev: events.append((minute, ev[0], ev[1], ev[2]))
                 else:
                     if random.random() < 0.20:
-                        events.append((minute, f"⚙️ *{minute}'* — {random.choice(_DANGER)}", "danger", "b"))
+                        events.append((minute, f"⚙️ *{minute}'* — {random.choice(_PRESSURE)}", "pressure", "b"))
                 if random.random() < CARD_PROB and yellows_b < 3 and nm_b:
                     yellows_b += 1
                     name = random.choice(nm_b)
-                    events.append((minute, f"🟨 *{minute}'* — {name} (предупреждение соп)", "card", "b"))
+                    events.append((minute, f"🟨 *{minute}'* — {name} (предупреждение)", "card", "b"))
                     if yellows_b == 2 and random.random() < 0.25:
                         red_b = True
-                        events.append((minute, f"🟥 *{minute}'* — {name} — УДАЛЁН! (соп)", "card", "b"))
+                        events.append((minute, f"🟥 *{minute}'* — {name} — УДАЛЁН!", "card", "b"))
 
         # Компенсированное время
         if abs(score_a - score_b) <= 1:
@@ -1953,7 +1952,12 @@ async def _run_match_animation(
         return mg, og
 
     def _evs_text(evs_subset: list, limit: int = 3) -> str:
-        return "\n".join(t for _, t, _, _ in evs_subset[-limit:])
+        """Показывает события с маркером *(соп)* для событий соперника."""
+        lines = []
+        for _, t, e, tm in evs_subset[-limit:]:
+            is_opp = tm and ((i_am_team_a and tm == "b") or (not i_am_team_a and tm == "a"))
+            lines.append(t + (" _(соп)_" if is_opp else ""))
+        return "\n".join(lines)
 
     def _score_line() -> str:
         return f"🔵 *{my_name}*  *{live_my}* : *{live_opp}*  🔴 *{opp_name}*"
