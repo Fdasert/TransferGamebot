@@ -1930,8 +1930,6 @@ async def _run_match_animation(
     _is_you      = (my_name == "Ты")
 
     all_events = stats.get("all_events", [])  # list[tuple[int,str,str,str]]
-    h1_events  = stats.get("h1_events",  [])
-    h2_events  = stats.get("h2_events",  [])
     poss_a     = stats["poss_a"]
     poss_b     = stats["poss_b"]
 
@@ -2050,9 +2048,16 @@ async def _run_match_animation(
         opts      = ATT_OPTS[mtype] if is_attacker else KPR_OPTS[mtype]
         base_text = ATT_BASE[mtype] if is_attacker else KPR_BASE[mtype]
 
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton(lbl, callback_data=f"fut_int_{val}") for lbl, val in opts
-        ]])
+        # Для типов с 3 кнопками (penalty, corner) — 2+1 чтобы не сплющивались
+        if len(opts) == 3:
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(lbl, callback_data=f"fut_int_{val}") for lbl, val in opts[:2]],
+                [InlineKeyboardButton(lbl, callback_data=f"fut_int_{val}") for lbl, val in opts[2:]],
+            ])
+        else:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton(lbl, callback_data=f"fut_int_{val}") for lbl, val in opts
+            ]])
         choice, auto = await _wait_interaction_with_countdown(
             user_id=my_uid, base_prompt=base_text, kb=kb, show_fn=_show, timeout=30.0,
         )
@@ -2186,7 +2191,7 @@ async def _run_match_animation(
                 result_txt = f"⚽ *ГОЛ!*{auto_tag}\n\n{setup}\n\n🔥 {excl}\n💰 Бонус: *+{bonus}* монет!"
             else:
                 if mtype == "var":
-                    excl = random.choice(["📹 VAR отменил: *НАРУШЕНИЕ!*", "🔴 VAR нашёл нарушение — момент отменён!", f"❌ Решение не в пользу {_att_player}!"])
+                    excl = random.choice(["📹 VAR засчитал гол — момент чистый 😞", "🔴 Нарушения нет — гол подтверждён!", f"❌ VAR не нашёл нарушения — гол засчитан!"])
                 else:
                     excl = random.choice(["Не угадал... 😔", f"*{_att_player}* оказался хитрее 😤", "Обидный гол 😞"])
                 result_txt = f"😤 *Гол в твои ворота!*{auto_tag}\n\n{setup}\n\n{excl}"
@@ -2496,7 +2501,7 @@ async def _run_match_animation(
     # ── 2-й тайм: старт ──────────────────────────────────────────────────────
     sh_comm = random.choice(_COMM_SECOND_HALF)
     tension = f"_{my_name if ht_my > ht_opp else opp_name} ведёт! {sh_comm}_" if ht_my != ht_opp else f"_{sh_comm}_"
-    _refresh_live(45)
+    # _refresh_live(45) уже вызван выше при перерыве — повторно не нужен
     await _show(f"⏱ *45' — 2-й тайм*\n\n{_score_line()}\n\n{tension}")
     await asyncio.sleep(1.8)
 
@@ -2505,14 +2510,14 @@ async def _run_match_animation(
     await _tick(50, 45)
     await _tick(55, 50)
     await _tick(60, 55)
+    await _tick(65, 60)
 
     # Тактическая замена — соло (~65% шанс, 61–67')
+    # ВАЖНО: тик 65' должен быть ДО замены, чтобы счёт 65' не включал гол на 66'
     if do_sub:
         _lm_before = live_my
         bonus_total += await _interactive_substitution(random.randint(61, 67))
         int_my += live_my - _lm_before  # sync int_my если замена забила
-
-    await _tick(65, 60)
 
     # Shared интерактив 2-го тайма (всегда)
     for m_cfg in h2_moments:
@@ -2838,6 +2843,7 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     # другие апдейты (нажатия кнопок) пока идёт анимация.
     # create_task возвращает управление боту сразу, анимации идут параллельно.
     async def _animations_and_cleanup():
+      try:
         results = await asyncio.gather(
             _run_match_animation(
                 bot=ctx.bot,
@@ -2937,6 +2943,7 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
 
+      finally:
         for mid in [m["moment_id"] for m in shared_moments]:
             _match_moments.pop(mid, None)
 
@@ -5165,6 +5172,8 @@ async def _draft_multi_check_and_start(room_id: str, bot, trigger_uid: int) -> N
         "acc_b":     match_stats["acc_a"],
         "corners_a": match_stats["corners_b"],
         "corners_b": match_stats["corners_a"],
+        "yellows_a": match_stats["yellows_b"],
+        "yellows_b": match_stats["yellows_a"],
     }
 
     # Создаём общие интерактивные моменты для обоих игроков
