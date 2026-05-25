@@ -1494,6 +1494,12 @@ _COMM_LEADING = [
     "Соперник вынужден идти вперёд, открывая пространство.",
     "Тактика работает — ведущая команда держит счёт!",
     "Контроль мяча и выжидание — классическая тактика лидера.",
+    "Игра по счёту — каждый пас выверен до миллиметра.",
+    "Команда уверенно держит нити игры в своих руках.",
+    "Защитные редуты выстроены безупречно.",
+    "Счёт устраивает — незачем рисковать.",
+    "Уверенность растёт с каждой минутой владения.",
+    "Соперник нервничает — ведущая команда этим пользуется.",
 ]
 
 _COMM_TRAILING = [
@@ -1504,6 +1510,12 @@ _COMM_TRAILING = [
     "Каждая минута без гола — как игла в сердце болельщика.",
     "Надо забивать! Команда бросается в атаку!",
     "Риск оправдан — другого выхода нет!",
+    "Давление нарастает — соперник едва сдерживает натиск.",
+    "Мяч снова и снова летит в сторону чужих ворот.",
+    "Вся команда в атаке — защита оголена, но выбора нет.",
+    "Один точный удар — и всё изменится!",
+    "Поверить в камбэк — и он случится.",
+    "Ничто не решено, пока не прозвучал финальный свисток.",
 ]
 
 _COMM_DRAW_LATE = [
@@ -1513,6 +1525,12 @@ _COMM_DRAW_LATE = [
     "Любой момент может стать решающим!",
     "Обе команды хотят только победы — никаких компромиссов!",
     "Одно очко мало для обоих — ищем гол-победитель!",
+    "Равенство на табло — неравенство в сердцебиении.",
+    "Кто первый дрогнет — тот проиграет.",
+    "Ничья устраивает никого — игра продолжается на пределе.",
+    "Стадион притих в ожидании развязки.",
+    "Одна ошибка — и всё решено.",
+    "Борьба идёт за каждый сантиметр поля.",
 ]
 
 _COMM_HT = [
@@ -1577,7 +1595,11 @@ def _simulate_match(sa: dict, sb: dict) -> dict:
     def _chance(att: float, def_: float, scorers: list, is_penalty: bool,
                 minute: int, is_a: bool) -> tuple[str, str, str] | None:
         nonlocal score_a, score_b, shots_a, shots_b, corners_a, corners_b
-        goal_prob = (att / max(att + def_, 1)) * (0.70 if is_penalty else GOAL_BASE * 2)
+        # Усиленная зависимость от разницы атт/деф: 90атт vs 70деф ≈ +35% к голам
+        _base  = att / max(att + def_, 1)
+        _steep = max(0.15, min(0.85, 0.5 + (_base - 0.5) * 2.5))
+        # Пенальти в симуляции: реалистичная конверсия ~75%, не GOAL_BASE*0.7≈35%
+        goal_prob = max(0.60, min(0.90, _steep * 1.5)) if is_penalty else _steep * GOAL_BASE * 2
         r = random.random()
         name = random.choice(scorers)
         team = "a" if is_a else "b"
@@ -1843,7 +1865,9 @@ def _make_shared_moments_pvp(
     shared: list[dict] = []
     for half_num in (1, 2):
         mtype    = random.choice(moment_pool)
-        minute   = random.randint(28, 42) if half_num == 1 else random.randint(58, 72)
+        # H1: момент показывается после тика 35'/40' → минута 36-44
+        # H2: момент показывается после тика 65' и замены → минута 66-74
+        minute   = random.randint(36, 44) if half_num == 1 else random.randint(66, 74)
         attacker = random.choice([uid_a, uid_b])
         keeper   = uid_b if attacker == uid_a else uid_a
         mid      = f"{match_key}_{half_num}_{mtype}"
@@ -1880,7 +1904,9 @@ def _make_shared_moments_vs_bot(
     }
     for half_num in (1, 2):
         mtype    = random.choice(moment_pool)
-        minute   = random.randint(28, 42) if half_num == 1 else random.randint(58, 72)
+        # H1: момент показывается после тика 35'/40' → минута 36-44
+        # H2: момент показывается после тика 65' и замены → минута 66-74
+        minute   = random.randint(36, 44) if half_num == 1 else random.randint(66, 74)
         attacker = random.choice([human_uid, BOT_UID])
         keeper   = BOT_UID if attacker == human_uid else human_uid
         mid      = f"{match_key}_{half_num}_{mtype}"
@@ -1954,7 +1980,7 @@ async def _run_match_animation(
         lines = []
         for _, t, e, tm in evs_subset[-limit:]:
             is_opp = tm and ((i_am_team_a and tm == "b") or (not i_am_team_a and tm == "a"))
-            lines.append(t + (" _(соп)_" if is_opp else ""))
+            lines.append(t + (" (соп)" if is_opp else ""))
         return "\n".join(lines)
 
     def _score_line() -> str:
@@ -2066,7 +2092,7 @@ async def _run_match_animation(
         moment.submit(my_uid, choice)
 
         await _show("✅ *Выбор сделан!* Ждём соперника...")
-        result = await moment.wait_result(timeout=10.0)
+        result = await moment.wait_result(timeout=35.0)  # ≥ countdown (30s) + буфер
         att_c = result["att"]
         kpr_c = result["kpr"]
 
@@ -2076,7 +2102,10 @@ async def _run_match_animation(
             prob = max(0.55, min(0.97, 0.82 + edge)) if att_c != kpr_c else max(0.05, min(0.35, 0.15 + edge))
             goal = random.random() < prob
         elif mtype == "1v1":
-            base_p = (0.68 if kpr_c == "attack" else 0.40) if att_c == "shot" else (0.60 if kpr_c == "stay" else 0.25)
+            # shot: стабильнее, dribble рискованнее но контрит agressive вратаря
+            # shot vs attack=0.55, shot vs stay=0.42
+            # dribble vs attack=0.75 (вратарь выбежал и промахнулся), dribble vs stay=0.28
+            base_p = (0.55 if kpr_c == "attack" else 0.42) if att_c == "shot" else (0.75 if kpr_c == "attack" else 0.28)
             goal = random.random() < max(0.05, min(0.95, base_p + edge))
         elif mtype == "freekick":
             match_dir = (att_c == "top" and kpr_c == "up") or (att_c == "bottom" and kpr_c == "down")
@@ -2090,15 +2119,19 @@ async def _run_match_animation(
             else:  # cross_far
                 base_p = 0.45 if kpr_c == "near_post" else (0.28 if kpr_c == "center" else 0.22)
             goal = random.random() < max(0.05, min(0.88, base_p + edge))
-        else:  # var
+        else:  # var — настоящий mind-game: defend рискованно, accept безопасно
+            # defend vs challenge: VAR нашёл нарушение — гол отменён (плохо для атт)
+            # defend vs accept:    соперник принял → гол засчитан (хорошо для атт)
+            # accept vs challenge: атт умно принял → keeper зря оспорил (+ATT)
+            # accept vs accept:    оба согласились → чистый шанс
             if att_c == "defend" and kpr_c == "challenge":
-                base_p = max(0.35, min(0.65, 0.50 + edge))
+                base_p = max(0.20, min(0.45, 0.30 + edge))   # высокий риск, VAR на стороне def
             elif att_c == "defend" and kpr_c == "accept":
-                base_p = 0.68
+                base_p = max(0.60, min(0.85, 0.72 + edge))   # keeper сдался → хорошо для атт
             elif att_c == "accept" and kpr_c == "challenge":
-                base_p = 0.22
-            else:
-                base_p = 0.44
+                base_p = max(0.45, min(0.70, 0.58 + edge))   # атт принял, keeper зря рискнул
+            else:  # accept vs accept
+                base_p = max(0.35, min(0.60, 0.48 + edge))   # оба согласились → чистый шанс
             goal = random.random() < base_p
 
         # ── Кинематограф ───────────────────────────────────────────────────────
@@ -2225,7 +2258,7 @@ async def _run_match_animation(
                 result_txt = f"🧤 *СЕЙВ!*{auto_tag}\n\n{setup}\n\n🔵 {excl}\n💰 Бонус: *+{bonus}* монет!"
 
         await _show(result_txt)
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(2.0)
         if goal:
             if is_attacker:
                 live_my += 1
@@ -2259,9 +2292,12 @@ async def _run_match_animation(
             choice = random.choice(["long", "short", "forward"])
         auto_tag = " _(авто)_" if auto else ""
         _outcomes = {
-            "long":    (0.30, f"⚡ Длинный вброс — опасный момент у штрафной!{auto_tag}", 60),
-            "short":   (0.22, f"🔄 Короткий пас — держим владение!{auto_tag}", 40),
-            "forward": (0.28, f"⚡ Быстрый вброс — прорыв в атаку!{auto_tag}", 50),
+            # long: высокий риск, высокая награда
+            "long":    (0.25, f"⚡ Длинный вброс — опасный момент у штрафной!{auto_tag}", 80),
+            # short: надёжно, небольшой бонус
+            "short":   (0.50, f"🔄 Короткий пас — сохраняем владение!{auto_tag}", 30),
+            # forward: средний риск, средняя награда
+            "forward": (0.35, f"⚡ Быстрый вброс — прорыв в атаку!{auto_tag}", 55),
         }
         prob, ok_txt, bonus = _outcomes.get(choice, (0.25, "...", 40))
         if random.random() < prob:
@@ -2280,20 +2316,17 @@ async def _run_match_animation(
         deficit = ht_opp - ht_my
         if deficit > 0:
             situation = f"⚠️ Проигрываешь — нужен гол во втором тайме!"
-            hint      = "_Рекомендуется: Прессинг или Контратаки_"
             correct   = "press"
         elif deficit < 0:
             situation = f"✅ Ведёшь — удержи результат!"
-            hint      = "_Рекомендуется: Оборона или Контратаки_"
             correct   = "defensive"
         else:
             situation = f"🤝 Ничья — нужна победа во втором тайме!"
-            hint      = "_Рекомендуется: Прессинг_"
             correct   = "press"
         prompt = (
             f"🕐 *Перерыв — тактика на 2-й тайм*\n\n"
             f"{_score_line()}\n\n"
-            f"{situation}\n{hint}"
+            f"{situation}"
         )
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔥 Прессинг", callback_data="fut_int_press"),
@@ -2329,11 +2362,11 @@ async def _run_match_animation(
         nonlocal live_my
         deficit = live_opp - live_my
         _pl = random.choice(_my_scorers)
+        situation = '⚠️ Проигрываешь' if deficit > 0 else ('✅ Ведёшь' if deficit < 0 else '🤝 Ничья')
         prompt = (
             f"🔄 *{minute}'* — *ТАКТИЧЕСКАЯ ЗАМЕНА!*\n\n"
             f"{_score_line()}\n\n"
-            f"💡 {'Проигрываешь' if deficit > 0 else ('Ведёшь' if deficit < 0 else 'Ничья')} — кого {'выпускаешь' if _is_you else 'выпускает тренер'}?\n\n"
-            f"{'⚡ Нападающий поможет отыграться' if deficit > 0 else '🛡 Защитник укрепит оборону' if deficit < 0 else '🔄 Полузащитник держит темп'}"
+            f"{situation} — кого {'выпускаешь' if _is_you else 'выпускает тренер'}?"
         )
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("⚡ Нападающий", callback_data="fut_int_striker"),
@@ -2427,10 +2460,10 @@ async def _run_match_animation(
         _refresh_live(minute)
         if evs:
             await _show(f"⏱ *{minute}'*\n\n{_score_line()}\n\n{_evs_text(evs)}")
-            await asyncio.sleep(1.8)
+            await asyncio.sleep(1.4)
         else:
             await _show(f"⏱ *{minute}'*\n\n{_score_line()}\n\n_{_atm(minute)}_")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.8)
 
     # ── Стартовый свисток ─────────────────────────────────────────────────────
     _star   = random.choice(_real_names) if _real_names else None
@@ -2914,7 +2947,7 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                         ra, rb, delta_ch, delta_ac)
 
         # Отправляем итог наград каждому
-        def _reward_msg(my_d: int, my_c: int, my_r: float) -> str:
+        def _reward_msg(my_d: int, my_c: int) -> str:
             r_str = f"+{my_d}" if my_d >= 0 else str(my_d)
             return (
                 f"📊 *Итог матча записан*\n\n"
@@ -2925,7 +2958,7 @@ async def cb_fut_accept(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await ctx.bot.send_message(
                 chat_id=challenger_id,
-                text=_reward_msg(delta_ch, coins_ch, r_ch),
+                text=_reward_msg(delta_ch, coins_ch),
                 parse_mode="Markdown",
             )
         except Exception:
