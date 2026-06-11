@@ -1062,3 +1062,208 @@ def cancel_fut_to_cube_transfer(transfer_id: int, user_id: int) -> tuple[bool, s
     cc.table("cross_transfers").update({"status": "expired"}).eq("id", transfer_id).execute()
     add_coins(user_id, int(t["amount_in"]))  # возвращаем FUT-монеты
     return True, ""
+
+
+# ── World Cup Predictions ─────────────────────────────────────────────────────
+
+def get_active_wc() -> dict | None:
+    res = (
+        get_client().table("wc_cups")
+        .select("*").neq("status", "finished")
+        .order("created_at", desc=True).limit(1).execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def get_wc(wc_id: str) -> dict | None:
+    res = get_client().table("wc_cups").select("*").eq("id", wc_id).execute()
+    return res.data[0] if res.data else None
+
+
+def create_wc(admin_uid: int, schedule: list, settings: dict) -> str:
+    import random
+    import string
+    from datetime import datetime, timezone
+    wc_id = "WC-" + "".join(random.choices(string.digits, k=4))
+    get_client().table("wc_cups").insert({
+        "id": wc_id,
+        "created_by": admin_uid,
+        "status": "active",
+        "schedule": schedule,
+        "settings": settings,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    return wc_id
+
+
+def update_wc(wc_id: str, **fields) -> None:
+    get_client().table("wc_cups").update(fields).eq("id", wc_id).execute()
+
+
+def wc_join(wc_id: str, uid: int, name: str) -> tuple[bool, str]:
+    existing = (
+        get_client().table("wc_participants")
+        .select("user_id").eq("wc_id", wc_id).eq("user_id", uid).execute()
+    )
+    if existing.data:
+        return False, "already_joined"
+    try:
+        get_client().table("wc_participants").insert({
+            "wc_id": wc_id, "user_id": uid, "name": name,
+            "total_points": 0, "exact_scores": 0,
+        }).execute()
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
+def wc_get_participants(wc_id: str) -> list[dict]:
+    res = (
+        get_client().table("wc_participants").select("*")
+        .eq("wc_id", wc_id)
+        .order("total_points", desc=True)
+        .order("exact_scores", desc=True)
+        .execute()
+    )
+    return res.data or []
+
+
+def wc_get_participant(wc_id: str, uid: int) -> dict | None:
+    res = (
+        get_client().table("wc_participants").select("*")
+        .eq("wc_id", wc_id).eq("user_id", uid).execute()
+    )
+    return res.data[0] if res.data else None
+
+
+def wc_submit_prediction(
+    wc_id: str, uid: int, match_id: str,
+    pred_winner: str, pred_home: int | None = None, pred_away: int | None = None,
+) -> tuple[bool, str]:
+    wc = get_wc(wc_id)
+    if not wc:
+        return False, "ЧМ не найден"
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == match_id), None)
+    if not match:
+        return False, "Матч не найден"
+    if match.get("status") != "open":
+        return False, "Прогнозы на этот матч закрыты"
+    if not wc_get_participant(wc_id, uid):
+        return False, "Сначала вступи в ЧМ!"
+    try:
+        existing = (
+            get_client().table("wc_predictions").select("wc_id")
+            .eq("wc_id", wc_id).eq("user_id", uid).eq("match_id", match_id).execute()
+        )
+        if existing.data:
+            get_client().table("wc_predictions").update({
+                "pred_winner": pred_winner,
+                "pred_home": pred_home,
+                "pred_away": pred_away,
+            }).eq("wc_id", wc_id).eq("user_id", uid).eq("match_id", match_id).execute()
+        else:
+            get_client().table("wc_predictions").insert({
+                "wc_id": wc_id, "user_id": uid, "match_id": match_id,
+                "pred_winner": pred_winner,
+                "pred_home": pred_home, "pred_away": pred_away,
+                "points_earned": 0, "resolved": False,
+            }).execute()
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
+def wc_get_user_predictions(wc_id: str, uid: int) -> dict[str, dict]:
+    res = (
+        get_client().table("wc_predictions").select("*")
+        .eq("wc_id", wc_id).eq("user_id", uid).execute()
+    )
+    return {p["match_id"]: p for p in (res.data or [])}
+
+
+def wc_set_match_result(wc_id: str, match_id: str, home_goals: int, away_goals: int) -> dict:
+    wc = get_wc(wc_id)
+    if not wc:
+        return {"ok": False, "err": "WC not found"}
+
+    actual_winner = "home" if home_goals > away_goals else ("away" if away_goals > home_goals else "draw")
+
+    schedule = wc.get("schedule") or []
+    match_found = False
+    for m in schedule:
+        if m["id"] == match_id:
+            m["home_goals"] = home_goals
+            m["away_goals"] = away_goals
+            m["status"] = "done"
+            match_found = True
+            break
+    if not match_found:
+        return {"ok": False, "err": "Match not found"}
+    update_wc(wc_id, schedule=schedule)
+
+    res = (
+        get_client().table("wc_predictions").select("*")
+        .eq("wc_id", wc_id).eq("match_id", match_id).eq("resolved", False).execute()
+    )
+    predictions = res.data or []
+    summary = {"ok": True, "total": len(predictions), "correct_winner": 0, "exact_scores": 0}
+
+    for pred in predictions:
+        pts = 0
+        if pred["pred_winner"] == actual_winner:
+            pts = 3
+            summary["correct_winner"] += 1
+            if (pred.get("pred_home") is not None and pred.get("pred_away") is not None
+                    and pred["pred_home"] == home_goals and pred["pred_away"] == away_goals):
+                pts = 5
+                summary["exact_scores"] += 1
+
+        get_client().table("wc_predictions").update({
+            "points_earned": pts, "resolved": True,
+        }).eq("wc_id", wc_id).eq("user_id", pred["user_id"]).eq("match_id", match_id).execute()
+
+        if pts > 0:
+            part = wc_get_participant(wc_id, pred["user_id"])
+            if part:
+                get_client().table("wc_participants").update({
+                    "total_points": part["total_points"] + pts,
+                    "exact_scores": part["exact_scores"] + (1 if pts == 5 else 0),
+                }).eq("wc_id", wc_id).eq("user_id", pred["user_id"]).execute()
+
+    return summary
+
+
+def wc_open_match(wc_id: str, match_id: str) -> bool:
+    wc = get_wc(wc_id)
+    if not wc:
+        return False
+    schedule = wc.get("schedule") or []
+    for m in schedule:
+        if m["id"] == match_id:
+            m["status"] = "open"
+            update_wc(wc_id, schedule=schedule)
+            return True
+    return False
+
+
+def wc_close_match(wc_id: str, match_id: str) -> bool:
+    wc = get_wc(wc_id)
+    if not wc:
+        return False
+    schedule = wc.get("schedule") or []
+    for m in schedule:
+        if m["id"] == match_id and m.get("status") == "open":
+            m["status"] = "closed"
+            update_wc(wc_id, schedule=schedule)
+            return True
+    return False
+
+
+def wc_add_match(wc_id: str, match: dict) -> bool:
+    wc = get_wc(wc_id)
+    if not wc:
+        return False
+    schedule = wc.get("schedule") or []
+    schedule.append(match)
+    update_wc(wc_id, schedule=schedule)
+    return True

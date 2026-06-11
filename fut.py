@@ -749,6 +749,7 @@ async def cb_fut_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
              InlineKeyboardButton("⚔️ Матчи",       callback_data="fut_match")],
             [InlineKeyboardButton("🛒 Рынок",       callback_data="fut_market"),
              InlineKeyboardButton("🎲 Драфт",       callback_data="fut_draft")],
+            [InlineKeyboardButton("🌍 Чемпионат мира", callback_data="fut_wc")],
             [InlineKeyboardButton("◀ В меню",       callback_data="menu_back")],
         ]),
     )
@@ -4222,6 +4223,147 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
         )
         return True
 
+    # ── ЧМ: ввод результата матча (суперадмин) ───────────────────────────────
+    if action == "wc_result_input":
+        data     = pending.get("data", {})
+        wc_id    = data.get("wc_id")
+        match_id = data.get("match_id")
+
+        # Парсим "2:1" или "2 1" или "2-1"
+        import re
+        m_score = re.match(r"^(\d+)\s*[:\-\s]\s*(\d+)$", text.strip())
+        if not m_score:
+            await update.message.reply_text(
+                "❌ Неверный формат. Введи счёт как `2:1` или `0:0`",
+                parse_mode="Markdown",
+            )
+            return True
+
+        h_goals = int(m_score.group(1))
+        a_goals = int(m_score.group(2))
+
+        db.clear_pending_action(uid)
+        summary = db.wc_set_match_result(wc_id, match_id, h_goals, a_goals)
+
+        if not summary.get("ok"):
+            await update.message.reply_text(f"❌ Ошибка: {summary.get('err')}")
+            return True
+
+        # Найдём матч для отображения
+        wc    = db.get_wc(wc_id)
+        match = next((mm for mm in (wc.get("schedule") or []) if mm["id"] == match_id), {}) if wc else {}
+        hf    = match.get("home_flag", "")
+        af    = match.get("away_flag", "")
+        home  = match.get("home", "?")
+        away  = match.get("away", "?")
+
+        # Определяем победителя
+        if h_goals > a_goals:
+            winner_text = f"{hf} {home}"
+        elif a_goals > h_goals:
+            winner_text = f"{af} {away}"
+        else:
+            winner_text = "🤝 Ничья"
+
+        await update.message.reply_text(
+            f"✅ *Результат записан!*\n\n"
+            f"*{hf} {home}* {h_goals}:{a_goals} *{af} {away}*\n"
+            f"Победитель: *{winner_text}*\n\n"
+            f"📊 Прогнозов обработано: *{summary['total']}*\n"
+            f"✅ Угадали победителя: *{summary['correct_winner']}*\n"
+            f"🎯 Точный счёт: *{summary['exact_scores']}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 К матчам", callback_data="fut_wc_admin_list_0"),
+            ]]),
+        )
+
+        # Уведомить всех участников
+        if wc:
+            parts = db.wc_get_participants(wc_id)
+            my_preds_by_uid = {}
+            res_p = db.get_client().table("wc_predictions").select("*").eq("wc_id", wc_id).eq("match_id", match_id).execute()
+            for pred in (res_p.data or []):
+                my_preds_by_uid[pred["user_id"]] = pred
+            for p in parts:
+                pred = my_preds_by_uid.get(p["user_id"])
+                if not pred:
+                    continue
+                pts       = pred.get("points_earned", 0)
+                pred_w    = pred.get("pred_winner", "")
+                pw_label  = {"home": f"{hf}{home}", "away": f"{af}{away}", "draw": "🤝"}.get(pred_w, "?")
+                ph = pred.get("pred_home")
+                pa = pred.get("pred_away")
+                sc_str = f" ({ph}:{pa})" if ph is not None else ""
+                result_icon = "✅" if pts > 0 else "❌"
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=p["user_id"],
+                        text=(
+                            f"{result_icon} *Матч сыгран!*\n\n"
+                            f"*{hf} {home}* {h_goals}:{a_goals} *{af} {away}*\n\n"
+                            f"Твой прогноз: *{pw_label}*{sc_str}\n"
+                            f"Результат: *+{pts} очк.*" if pts > 0 else
+                            f"{result_icon} *Матч сыгран!*\n\n"
+                            f"*{hf} {home}* {h_goals}:{a_goals} *{af} {away}*\n\n"
+                            f"Твой прогноз: *{pw_label}*{sc_str}\n"
+                            f"Результат: *0 очков*"
+                        ),
+                        parse_mode="Markdown",
+                    )
+                except Exception:
+                    pass
+        return True
+
+    # ── ЧМ: ввод команд для нового матча (суперадмин) ────────────────────────
+    if action == "wc_add_match":
+        data      = pending.get("data", {})
+        wc_id     = data.get("wc_id")
+        round_key = data.get("round", "sf")
+
+        # Парсим "Германия vs Аргентина" или "Германия - Аргентина"
+        import re
+        m_teams = re.split(r"\s+(?:vs\.?|-|—)\s+", text.strip(), maxsplit=1, flags=re.IGNORECASE)
+        if len(m_teams) != 2 or not m_teams[0].strip() or not m_teams[1].strip():
+            await update.message.reply_text(
+                "❌ Формат: `Германия vs Аргентина`",
+                parse_mode="Markdown",
+            )
+            return True
+
+        home_team = m_teams[0].strip().capitalize()
+        away_team = m_teams[1].strip().capitalize()
+
+        # Генерируем id для матча
+        wc_data  = db.get_wc(wc_id)
+        schedule = (wc_data.get("schedule") or []) if wc_data else []
+        rnd_short = {"r16": "R16", "qf": "QF", "sf": "SF", "3rd": "3RD", "final": "FIN"}.get(round_key, round_key.upper())
+        existing_ids = [m["id"] for m in schedule if m["id"].startswith(rnd_short)]
+        new_id = f"{rnd_short}{len(existing_ids) + 1}"
+
+        new_match = {
+            "id": new_id, "round": round_key, "group": "",
+            "home": home_team, "home_flag": _team_flag(home_team),
+            "away": away_team, "away_flag": _team_flag(away_team),
+            "status": "upcoming", "home_goals": None, "away_goals": None,
+        }
+        db.clear_pending_action(uid)
+        db.wc_add_match(wc_id, new_match)
+
+        hf = _team_flag(home_team)
+        af = _team_flag(away_team)
+        await update.message.reply_text(
+            f"✅ *Матч добавлен!*\n\n"
+            f"`{new_id}` — {WC_ROUND_LABELS.get(round_key, round_key)}\n"
+            f"*{hf} {home_team}* — *{af} {away_team}*\n\n"
+            f"Открой прогнозы через «📋 Матчи».",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Матчи", callback_data="fut_wc_admin_list_0"),
+            ]]),
+        )
+        return True
+
     # ── FUT→CUB обменник ──────────────────────────────────────────────────────
     if action == "fut_exchange_amount":
         try:
@@ -6431,6 +6573,1090 @@ async def cb_fut_exchange_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  ЧЕМПИОНАТ МИРА — ПРОГНОЗЫ
+# ══════════════════════════════════════════════════════════════════════════════
+
+WC_ROUND_LABELS: dict[str, str] = {
+    "group": "Групповой этап",
+    "r16":   "1/8 финала",
+    "qf":    "Четвертьфинал",
+    "sf":    "Полуфинал",
+    "3rd":   "Матч за 3-е место",
+    "final": "Финал",
+}
+WC_ROUND_EMOJI: dict[str, str] = {
+    "group": "🏟", "r16": "🔥", "qf": "⚡",
+    "sf": "🌟", "3rd": "🥉", "final": "🏆",
+}
+WC_STATUS_EMOJI: dict[str, str] = {
+    "upcoming": "⏳", "open": "🟢", "closed": "🔴", "done": "✅",
+}
+WC_PRIZES_DEFAULT: dict[str, int] = {"1": 50_000, "2": 25_000, "3": 10_000}
+
+_TEAM_FLAGS: dict[str, str] = {
+    "бразилия": "🇧🇷", "германия": "🇩🇪", "аргентина": "🇦🇷",
+    "франция": "🇫🇷", "испания": "🇪🇸", "португалия": "🇵🇹",
+    "нидерланды": "🇳🇱", "голландия": "🇳🇱", "англия": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
+    "бельгия": "🇧🇪", "хорватия": "🇭🇷", "сенегал": "🇸🇳",
+    "мексика": "🇲🇽", "уругвай": "🇺🇾", "япония": "🇯🇵",
+    "марокко": "🇲🇦", "южная корея": "🇰🇷", "корея": "🇰🇷",
+    "италия": "🇮🇹", "швейцария": "🇨🇭", "дания": "🇩🇰",
+    "швеция": "🇸🇪", "польша": "🇵🇱", "австрия": "🇦🇹",
+    "сербия": "🇷🇸", "турция": "🇹🇷", "украина": "🇺🇦",
+    "греция": "🇬🇷", "шотландия": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "ирландия": "🇮🇪",
+    "австралия": "🇦🇺", "сша": "🇺🇸", "канада": "🇨🇦",
+    "эквадор": "🇪🇨", "колумбия": "🇨🇴", "чили": "🇨🇱",
+    "гана": "🇬🇭", "нигерия": "🇳🇬", "камерун": "🇨🇲",
+    "египет": "🇪🇬", "тунис": "🇹🇳", "иран": "🇮🇷",
+    "саудовская аравия": "🇸🇦", "катар": "🇶🇦", "китай": "🇨🇳",
+}
+
+WC_SCHED_PAGE = 6  # матчей на страницу расписания
+WC_LB_PAGE    = 10  # участников на страницу таблицы
+
+
+def _team_flag(name: str) -> str:
+    return _TEAM_FLAGS.get(name.lower().strip(), "🏳")
+
+
+def _wc_schedule_mini() -> list[dict]:
+    def _m(mid, rnd, grp, h, a):
+        return {
+            "id": mid, "round": rnd, "group": grp,
+            "home": h, "home_flag": _team_flag(h),
+            "away": a, "away_flag": _team_flag(a),
+            "status": "upcoming", "home_goals": None, "away_goals": None,
+        }
+    return [
+        _m("A1","group","A","Бразилия","Германия"),
+        _m("A2","group","A","Япония","Марокко"),
+        _m("A3","group","A","Бразилия","Япония"),
+        _m("A4","group","A","Германия","Марокко"),
+        _m("A5","group","A","Бразилия","Марокко"),
+        _m("A6","group","A","Германия","Япония"),
+        _m("B1","group","B","Аргентина","Франция"),
+        _m("B2","group","B","Испания","Португалия"),
+        _m("B3","group","B","Аргентина","Испания"),
+        _m("B4","group","B","Франция","Португалия"),
+        _m("B5","group","B","Аргентина","Португалия"),
+        _m("B6","group","B","Испания","Франция"),
+    ]
+
+
+def _wc_schedule_standard() -> list[dict]:
+    def _m(mid, rnd, grp, h, a):
+        return {
+            "id": mid, "round": rnd, "group": grp,
+            "home": h, "home_flag": _team_flag(h),
+            "away": a, "away_flag": _team_flag(a),
+            "status": "upcoming", "home_goals": None, "away_goals": None,
+        }
+    return [
+        _m("A1","group","A","Бразилия","Германия"),
+        _m("A2","group","A","Япония","Марокко"),
+        _m("A3","group","A","Бразилия","Япония"),
+        _m("A4","group","A","Германия","Марокко"),
+        _m("A5","group","A","Бразилия","Марокко"),
+        _m("A6","group","A","Германия","Япония"),
+        _m("B1","group","B","Аргентина","Франция"),
+        _m("B2","group","B","Испания","Португалия"),
+        _m("B3","group","B","Аргентина","Испания"),
+        _m("B4","group","B","Франция","Португалия"),
+        _m("B5","group","B","Аргентина","Португалия"),
+        _m("B6","group","B","Испания","Франция"),
+        _m("C1","group","C","Бельгия","Хорватия"),
+        _m("C2","group","C","Сенегал","Мексика"),
+        _m("C3","group","C","Бельгия","Сенегал"),
+        _m("C4","group","C","Хорватия","Мексика"),
+        _m("C5","group","C","Бельгия","Мексика"),
+        _m("C6","group","C","Хорватия","Сенегал"),
+        _m("D1","group","D","Нидерланды","Англия"),
+        _m("D2","group","D","Уругвай","Южная Корея"),
+        _m("D3","group","D","Нидерланды","Уругвай"),
+        _m("D4","group","D","Англия","Южная Корея"),
+        _m("D5","group","D","Нидерланды","Южная Корея"),
+        _m("D6","group","D","Англия","Уругвай"),
+    ]
+
+
+def _wc_rank_emoji(rank: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
+
+
+def _wc_match_line(m: dict, pred: dict | None = None) -> str:
+    st   = WC_STATUS_EMOJI.get(m.get("status", "upcoming"), "⏳")
+    hf   = m.get("home_flag", "")
+    af   = m.get("away_flag", "")
+    home = m.get("home", "?")
+    away = m.get("away", "?")
+    rnd_e = WC_ROUND_EMOJI.get(m.get("round", "group"), "")
+    grp  = f"Гр.{m['group']} " if m.get("group") else ""
+
+    score_str = ""
+    if m.get("status") == "done" and m.get("home_goals") is not None:
+        score_str = f" *{m['home_goals']}:{m['away_goals']}*"
+
+    pred_str = ""
+    if pred:
+        w = pred.get("pred_winner", "")
+        ph = pred.get("pred_home")
+        pa = pred.get("pred_away")
+        pts = pred.get("points_earned", 0)
+        resolved = pred.get("resolved", False)
+        pred_icon = {"home": hf or "🏠", "away": af or "✈️", "draw": "🤝"}.get(w, "❓")
+        exact = f" {ph}:{pa}" if ph is not None and pa is not None else ""
+        if resolved:
+            pts_str = f"+{pts}🏅" if pts > 0 else "✗"
+            pred_str = f" _[{pred_icon}{exact} {pts_str}]_"
+        else:
+            pred_str = f" _[{pred_icon}{exact}]_"
+
+    return f"{st}{rnd_e} {grp}{hf}{home} — {af}{away}{score_str}{pred_str}"
+
+
+# ── Пользовательские хендлеры ─────────────────────────────────────────────────
+
+async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc$ — главный экран ЧМ."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    wc = db.get_active_wc()
+    if not wc:
+        from config import SUPERADMIN_IDS
+        is_sa = uid in SUPERADMIN_IDS
+        rows = []
+        if is_sa:
+            rows.append([InlineKeyboardButton("🛠 Создать ЧМ", callback_data="fut_wc_admin")])
+        rows.append([InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")])
+        await q.edit_message_text(
+            "🌍 *ЧЕМПИОНАТ МИРА — ПРОГНОЗЫ*\n\n"
+            "Нет активного чемпионата.\n\n"
+            "_Здесь можно делать прогнозы на матчи ЧМ и соревноваться с другими игроками!_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    wc_id    = wc["id"]
+    schedule = wc.get("schedule") or []
+    settings = wc.get("settings") or {}
+
+    parts        = db.wc_get_participants(wc_id)
+    open_matches = [m for m in schedule if m.get("status") == "open"]
+    done_matches = [m for m in schedule if m.get("status") == "done"]
+
+    my_part = db.wc_get_participant(wc_id, uid)
+    my_rank = None
+    if my_part:
+        my_rank = next((i + 1 for i, p in enumerate(parts) if p["user_id"] == uid), None)
+
+    top3 = "\n".join(
+        f"{_wc_rank_emoji(i+1)} *{p['name']}* — {p['total_points']} очк."
+        for i, p in enumerate(parts[:3])
+    ) or "_Пока нет участников_"
+
+    my_line = ""
+    if my_part:
+        my_line = f"\n\n👤 Ты: *{my_part['total_points']}* очк. (#{my_rank})"
+    else:
+        my_line = "\n\n_Ты ещё не записан — нажми «Участвовать»!_"
+
+    text = (
+        f"🌍 *{wc_id} — ЧЕМПИОНАТ МИРА*\n\n"
+        f"👥 Участников: *{len(parts)}*   "
+        f"📊 Матчей: *{len(done_matches)}/{len(schedule)}*\n"
+        f"🟢 Открыто для прогнозов: *{len(open_matches)}*\n\n"
+        f"🏆 *Топ-3:*\n{top3}"
+        f"{my_line}"
+    )
+
+    kb = []
+    if not my_part:
+        fee     = settings.get("entry_fee", 0)
+        fee_str = f" ({_fmt(fee)} 💰)" if fee else " (бесплатно)"
+        kb.append([InlineKeyboardButton(f"✅ Участвовать{fee_str}", callback_data="fut_wc_join")])
+    if open_matches:
+        kb.append([InlineKeyboardButton(
+            f"🎯 Сделать прогноз ({len(open_matches)} матч.)",
+            callback_data="fut_wc_schedule_0",
+        )])
+    kb.append([
+        InlineKeyboardButton("📋 Расписание", callback_data="fut_wc_schedule_0"),
+        InlineKeyboardButton("🏆 Таблица",    callback_data="fut_wc_lb_0"),
+    ])
+    if my_part:
+        kb.append([InlineKeyboardButton("📝 Мои прогнозы", callback_data="fut_wc_mypreds_0")])
+    from config import SUPERADMIN_IDS
+    if uid in SUPERADMIN_IDS:
+        kb.append([InlineKeyboardButton("🛠 Управление", callback_data="fut_wc_admin")])
+    kb.append([InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_join$ — записаться в ЧМ."""
+    q   = update.callback_query
+    await q.answer()
+    uid  = q.from_user.id
+    user = db.get_user(uid)
+    if not user:
+        await q.answer("Сначала зарегистрируйся в боте.", show_alert=True)
+        return
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id    = wc["id"]
+    settings = wc.get("settings") or {}
+    fee      = settings.get("entry_fee", 0)
+
+    if fee > 0:
+        ok, bal = db.spend_coins(uid, fee)
+        if not ok:
+            await q.answer(f"Недостаточно монет! Нужно {_fmt(fee)} 💰", show_alert=True)
+            return
+
+    name    = user.get("display_name") or user.get("username") or f"User{uid}"
+    ok, err = db.wc_join(wc_id, uid, name)
+    if not ok:
+        if err == "already_joined":
+            await q.answer("Ты уже участвуешь!", show_alert=True)
+        else:
+            await q.answer(f"Ошибка: {err}", show_alert=True)
+        return
+
+    await q.answer("✅ Ты теперь участник ЧМ!")
+    await cb_fut_wc(update, ctx)
+
+
+async def cb_fut_wc_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_schedule_ — расписание с пагинацией."""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    offset = int(q.data.split("_")[-1])
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id    = wc["id"]
+    schedule = wc.get("schedule") or []
+    my_preds = db.wc_get_user_predictions(wc_id, uid)
+    my_part  = db.wc_get_participant(wc_id, uid)
+
+    page_matches = schedule[offset: offset + WC_SCHED_PAGE]
+    lines = []
+    for m in page_matches:
+        pred = my_preds.get(m["id"]) if my_part else None
+        lines.append(_wc_match_line(m, pred))
+
+    text = (
+        f"📋 *РАСПИСАНИЕ ЧМ* ({offset + 1}–{min(offset + WC_SCHED_PAGE, len(schedule))} из {len(schedule)})\n\n"
+        + "\n".join(lines)
+        + "\n\n*🟢* = открыт  *⏳* = предстоит  *✅* = сыгран"
+    )
+
+    # Кнопки "Предсказать" для открытых матчей на странице
+    kb = []
+    for m in page_matches:
+        if m.get("status") == "open":
+            hf   = m.get("home_flag", "")
+            af   = m.get("away_flag", "")
+            pred = my_preds.get(m["id"])
+            mark = " ✔" if pred and not pred.get("resolved") else ""
+            kb.append([InlineKeyboardButton(
+                f"🎯 {hf}{m['home']} — {af}{m['away']}{mark}",
+                callback_data=f"fut_wc_predict_{m['id']}",
+            )])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_wc_schedule_{offset - WC_SCHED_PAGE}"))
+    if offset + WC_SCHED_PAGE < len(schedule):
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_wc_schedule_{offset + WC_SCHED_PAGE}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Назад", callback_data="fut_wc")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_predict(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_predict_ — экран прогноза для одного матча."""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    mid    = q.data[len("fut_wc_predict_"):]
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id = wc["id"]
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match or match.get("status") != "open":
+        await q.answer("Прогнозы на этот матч недоступны.", show_alert=True)
+        return
+
+    my_part = db.wc_get_participant(wc_id, uid)
+    if not my_part:
+        await q.answer("Сначала вступи в ЧМ!", show_alert=True)
+        return
+
+    hf   = match.get("home_flag", "")
+    af   = match.get("away_flag", "")
+    home = match["home"]
+    away = match["away"]
+    rnd  = WC_ROUND_LABELS.get(match.get("round", "group"), "")
+    grp  = f" • Группа {match['group']}" if match.get("group") else ""
+
+    my_preds = db.wc_get_user_predictions(wc_id, uid)
+    existing = my_preds.get(mid)
+    existing_str = ""
+    if existing:
+        w  = existing.get("pred_winner", "")
+        ph = existing.get("pred_home")
+        pa = existing.get("pred_away")
+        wi = {"home": f"{hf}{home}", "away": f"{af}{away}", "draw": "🤝 Ничья"}.get(w, "?")
+        sc = f" ({ph}:{pa})" if ph is not None and pa is not None else ""
+        existing_str = f"\n\n_Твой текущий прогноз: *{wi}*{sc}_"
+
+    text = (
+        f"🎯 *ПРОГНОЗ НА МАТЧ*\n\n"
+        f"*{hf} {home}*  vs  *{af} {away}*\n"
+        f"_{rnd}{grp}_"
+        f"{existing_str}\n\n"
+        "Выбери победителя:"
+    )
+
+    kb = [
+        [InlineKeyboardButton(f"🏠 {hf} {home}", callback_data=f"fut_wc_pw_{mid}_home")],
+        [InlineKeyboardButton("🤝 Ничья",          callback_data=f"fut_wc_pw_{mid}_draw")],
+        [InlineKeyboardButton(f"✈️ {af} {away}",   callback_data=f"fut_wc_pw_{mid}_away")],
+        [InlineKeyboardButton("◀ Расписание",       callback_data="fut_wc_schedule_0")],
+    ]
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_pred_winner(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_pw_ — выбран победитель, теперь выбор точного счёта."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    # fut_wc_pw_{mid}_{winner}
+    tail   = q.data[len("fut_wc_pw_"):]
+    ridx   = tail.rfind("_")
+    mid    = tail[:ridx]
+    winner = tail[ridx + 1:]  # home / draw / away
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("ЧМ не найден.", show_alert=True)
+        return
+    wc_id = wc["id"]
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+
+    hf   = match.get("home_flag", "")
+    af   = match.get("away_flag", "")
+    home = match["home"]
+    away = match["away"]
+    w_label = {"home": f"{hf} {home}", "draw": "🤝 Ничья", "away": f"{af} {away}"}.get(winner, "?")
+
+    text = (
+        f"🎯 *{hf} {home} — {af} {away}*\n\n"
+        f"Выбрано: *{w_label}*\n\n"
+        "Угадай точный счёт (*+2 бонусных очка*):"
+    )
+
+    kb = []
+    if winner == "draw":
+        for g in range(4):
+            kb.append([InlineKeyboardButton(
+                f"{g}:{g}",
+                callback_data=f"fut_wc_psave_{mid}_{winner}_{g}_{g}",
+            )])
+    else:
+        # Показываем типичные счета для победителя
+        win_goals_opts = [1, 2, 3, 4]
+        rows_scores = []
+        for wg in win_goals_opts:
+            for lg in range(min(wg, 3)):
+                h_g = wg if winner == "home" else lg
+                a_g = wg if winner == "away" else lg
+                rows_scores.append(InlineKeyboardButton(
+                    f"{h_g}:{a_g}",
+                    callback_data=f"fut_wc_psave_{mid}_{winner}_{h_g}_{a_g}",
+                ))
+        # Раскладываем по 3 в ряд
+        for i in range(0, len(rows_scores), 3):
+            kb.append(rows_scores[i:i + 3])
+
+    # Сохранить без точного счёта
+    kb.append([InlineKeyboardButton("💾 Без счёта", callback_data=f"fut_wc_psave_{mid}_{winner}_-1_-1")])
+    kb.append([InlineKeyboardButton("◀ Назад",      callback_data=f"fut_wc_predict_{mid}")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_pred_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_psave_ — сохранить прогноз."""
+    q   = update.callback_query
+    uid = q.from_user.id
+
+    # fut_wc_psave_{mid}_{winner}_{h}_{a}
+    parts  = q.data[len("fut_wc_psave_"):].rsplit("_", 3)
+    mid, winner, h_str, a_str = parts[0], parts[1], parts[2], parts[3]
+    pred_h = int(h_str) if h_str != "-1" else None
+    pred_a = int(a_str) if a_str != "-1" else None
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("ЧМ не найден.", show_alert=True)
+        return
+
+    ok, err = db.wc_submit_prediction(wc["id"], uid, mid, winner, pred_h, pred_a)
+    if not ok:
+        await q.answer(err, show_alert=True)
+        return
+
+    match   = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), {})
+    hf      = match.get("home_flag", "")
+    af      = match.get("away_flag", "")
+    home    = match.get("home", "?")
+    away    = match.get("away", "?")
+    w_label = {"home": f"{hf} {home}", "draw": "🤝 Ничья", "away": f"{af} {away}"}.get(winner, "?")
+    sc_str  = f" · *{pred_h}:{pred_a}*" if pred_h is not None else ""
+
+    await q.answer(f"✅ Прогноз сохранён: {w_label}{sc_str}", show_alert=True)
+
+    # Показываем подтверждение с кнопками навигации
+    schedule = wc.get("schedule") or []
+    open_remaining = [m for m in schedule if m.get("status") == "open" and m["id"] != mid]
+    kb = []
+    if open_remaining:
+        m2 = open_remaining[0]
+        kb.append([InlineKeyboardButton(
+            f"🎯 Следующий: {m2.get('home_flag','')}{m2['home']} — {m2.get('away_flag','')}{m2['away']}",
+            callback_data=f"fut_wc_predict_{m2['id']}",
+        )])
+    kb.append([
+        InlineKeyboardButton("📋 Расписание", callback_data="fut_wc_schedule_0"),
+        InlineKeyboardButton("◀ ЧМ",          callback_data="fut_wc"),
+    ])
+    await q.edit_message_text(
+        f"✅ *Прогноз сохранён!*\n\n"
+        f"*{hf} {home}* — *{af} {away}*\n"
+        f"Твой выбор: *{w_label}*{sc_str}\n\n"
+        + (f"Осталось открытых матчей: *{len(open_remaining)}*" if open_remaining else "_Больше открытых матчей нет_"),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_wc_leaderboard(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_lb_ — таблица лидеров."""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    offset = int(q.data.split("_")[-1])
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id = wc["id"]
+    parts = db.wc_get_participants(wc_id)
+    total = len(parts)
+    page  = parts[offset: offset + WC_LB_PAGE]
+
+    lines = []
+    for i, p in enumerate(page):
+        rank  = offset + i + 1
+        mark  = " ←" if p["user_id"] == uid else ""
+        exact = f" ({p['exact_scores']}🎯)" if p.get("exact_scores") else ""
+        lines.append(
+            f"{_wc_rank_emoji(rank)} *{p['name']}*{mark} — "
+            f"*{p['total_points']}* очк.{exact}"
+        )
+
+    text = (
+        f"🏆 *ТАБЛИЦА — {wc_id}*\n\n"
+        + ("\n".join(lines) or "_Нет участников_")
+        + f"\n\n_Всего участников: {total}_"
+        + "\n_Цифра 🎯 = угаданных точных счётов_"
+    )
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_wc_lb_{offset - WC_LB_PAGE}"))
+    if offset + WC_LB_PAGE < total:
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_wc_lb_{offset + WC_LB_PAGE}"))
+    kb = [nav] if nav else []
+    kb.append([InlineKeyboardButton("◀ Назад", callback_data="fut_wc")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_mypreds(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_mypreds_ — мои прогнозы с пагинацией."""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+    offset = int(q.data.split("_")[-1])
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id    = wc["id"]
+    schedule = wc.get("schedule") or []
+    my_preds = db.wc_get_user_predictions(wc_id, uid)
+    my_part  = db.wc_get_participant(wc_id, uid)
+
+    if not my_part:
+        await q.answer("Ты не участвуешь в ЧМ.", show_alert=True)
+        return
+
+    # Матчи с прогнозами
+    pred_matches = [m for m in schedule if m["id"] in my_preds]
+    total_pts    = my_part["total_points"]
+    exact_cnt    = my_part.get("exact_scores", 0)
+
+    page_m = pred_matches[offset: offset + WC_SCHED_PAGE]
+    lines  = []
+    for m in page_m:
+        pred = my_preds.get(m["id"])
+        lines.append(_wc_match_line(m, pred))
+
+    text = (
+        f"📝 *МОИ ПРОГНОЗЫ*\n\n"
+        f"Всего прогнозов: *{len(pred_matches)}*\n"
+        f"Очков набрано: *{total_pts}* (из них точных счётов: *{exact_cnt}*)\n\n"
+        + ("\n".join(lines) or "_Нет прогнозов_")
+    )
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_wc_mypreds_{offset - WC_SCHED_PAGE}"))
+    if offset + WC_SCHED_PAGE < len(pred_matches):
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_wc_mypreds_{offset + WC_SCHED_PAGE}"))
+    kb = [nav] if nav else []
+    kb.append([InlineKeyboardButton("◀ Назад", callback_data="fut_wc")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+# ── Административные хендлеры ─────────────────────────────────────────────────
+
+async def cb_fut_wc_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin$ — панель управления ЧМ (суперадмин)."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.edit_message_text(
+            "🛠 *УПРАВЛЕНИЕ ЧМ*\n\nАктивного ЧМ нет.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆕 Создать ЧМ", callback_data="fut_wc_admin_create")],
+                [InlineKeyboardButton("◀ Назад",       callback_data="fut_wc")],
+            ]),
+        )
+        return
+
+    wc_id    = wc["id"]
+    schedule = wc.get("schedule") or []
+    parts    = db.wc_get_participants(wc_id)
+    open_m   = [m for m in schedule if m.get("status") == "open"]
+    done_m   = [m for m in schedule if m.get("status") == "done"]
+    settings = wc.get("settings") or {}
+    prizes   = settings.get("prizes", WC_PRIZES_DEFAULT)
+
+    await q.edit_message_text(
+        f"🛠 *УПРАВЛЕНИЕ — {wc_id}*\n\n"
+        f"Участников: *{len(parts)}*\n"
+        f"Матчей: *{len(done_m)} сыграно / {len(schedule)} всего*\n"
+        f"🟢 Открыто: *{len(open_m)}*\n\n"
+        f"Призы: 🥇 {_fmt(prizes.get('1', 0))} | "
+        f"🥈 {_fmt(prizes.get('2', 0))} | "
+        f"🥉 {_fmt(prizes.get('3', 0))}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 Матчи",         callback_data="fut_wc_admin_list_0")],
+            [InlineKeyboardButton("➕ Добавить матч", callback_data="fut_wc_admin_add")],
+            [InlineKeyboardButton("🏁 Завершить ЧМ",  callback_data="fut_wc_admin_finish")],
+            [InlineKeyboardButton("◀ Назад",           callback_data="fut_wc")],
+        ]),
+    )
+
+
+async def cb_fut_wc_admin_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_list_ — список матчей для управления."""
+    q      = update.callback_query
+    await q.answer()
+    uid    = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    offset = int(q.data.split("_")[-1])
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id    = wc["id"]
+    schedule = wc.get("schedule") or []
+    page_m   = schedule[offset: offset + WC_SCHED_PAGE]
+
+    kb = []
+    for m in page_m:
+        st   = WC_STATUS_EMOJI.get(m.get("status", "upcoming"), "⏳")
+        hf   = m.get("home_flag", "")
+        af   = m.get("away_flag", "")
+        label = f"{st} {m['id']}: {hf}{m['home'][:8]} — {af}{m['away'][:8]}"
+        if m.get("status") == "done" and m.get("home_goals") is not None:
+            label += f" {m['home_goals']}:{m['away_goals']}"
+        kb.append([InlineKeyboardButton(label, callback_data=f"fut_wc_admin_match_{m['id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"fut_wc_admin_list_{offset - WC_SCHED_PAGE}"))
+    if offset + WC_SCHED_PAGE < len(schedule):
+        nav.append(InlineKeyboardButton("▶", callback_data=f"fut_wc_admin_list_{offset + WC_SCHED_PAGE}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("◀ Назад", callback_data="fut_wc_admin")])
+
+    await q.edit_message_text(
+        f"📋 *МАТЧИ — {wc_id}* ({offset + 1}–{min(offset + WC_SCHED_PAGE, len(schedule))} из {len(schedule)})\n\nВыбери матч для управления:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_wc_admin_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_match_ — детали матча + кнопки управления."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    mid = q.data[len("fut_wc_admin_match_"):]
+    wc  = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id = wc["id"]
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+
+    hf     = match.get("home_flag", "")
+    af     = match.get("away_flag", "")
+    status = match.get("status", "upcoming")
+    st_lbl = {"upcoming": "⏳ Предстоит", "open": "🟢 Открыт", "closed": "🔴 Закрыт", "done": "✅ Завершён"}.get(status, status)
+    rnd    = WC_ROUND_LABELS.get(match.get("round", "group"), "")
+    grp    = f" • Группа {match['group']}" if match.get("group") else ""
+
+    res_str = ""
+    if status == "done":
+        res_str = f"\nРезультат: *{match.get('home_goals')}:{match.get('away_goals')}*"
+
+    # Статистика прогнозов
+    res_preds = db.get_client().table("wc_predictions").select("pred_winner, resolved, points_earned").eq("wc_id", wc_id).eq("match_id", mid).execute()
+    pred_rows = res_preds.data or []
+    n_preds   = len(pred_rows)
+    n_res     = sum(1 for p in pred_rows if p.get("resolved"))
+
+    text = (
+        f"⚙️ *{mid}: {hf}{match['home']} — {af}{match['away']}*\n"
+        f"_{rnd}{grp}_\n"
+        f"Статус: {st_lbl}{res_str}\n"
+        f"Прогнозов: *{n_preds}* (подведено: {n_res})"
+    )
+
+    kb = []
+    if status == "upcoming":
+        kb.append([InlineKeyboardButton("🟢 Открыть прогнозы", callback_data=f"fut_wc_admin_open_{mid}")])
+    if status == "open":
+        kb.append([InlineKeyboardButton("🔴 Закрыть прогнозы", callback_data=f"fut_wc_admin_close_{mid}")])
+    if status in ("open", "closed", "upcoming"):
+        kb.append([InlineKeyboardButton("📝 Ввести результат", callback_data=f"fut_wc_admin_result_{mid}")])
+    kb.append([InlineKeyboardButton("◀ К списку", callback_data="fut_wc_admin_list_0")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_admin_open(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_open_ — открыть прогнозы на матч."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    mid = q.data[len("fut_wc_admin_open_"):]
+    wc  = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    ok = db.wc_open_match(wc["id"], mid)
+    await q.answer("✅ Прогнозы открыты!" if ok else "❌ Ошибка", show_alert=True)
+
+    # Уведомить всех участников
+    if ok:
+        wc_fresh = db.get_wc(wc["id"])
+        match    = next((m for m in (wc_fresh.get("schedule") or []) if m["id"] == mid), {})
+        hf       = match.get("home_flag", "")
+        af       = match.get("away_flag", "")
+        home     = match.get("home", "?")
+        away     = match.get("away", "?")
+        parts    = db.wc_get_participants(wc["id"])
+        for p in parts:
+            try:
+                await ctx.bot.send_message(
+                    chat_id=p["user_id"],
+                    text=(
+                        f"🟢 *ПРОГНОЗЫ ОТКРЫТЫ!*\n\n"
+                        f"*{hf} {home}* — *{af} {away}*\n\n"
+                        f"_Сделай прогноз в FUT-меню → 🌍 ЧМ_"
+                    ),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🎯 Сделать прогноз", callback_data=f"fut_wc_predict_{mid}"),
+                    ]]),
+                )
+            except Exception:
+                pass
+
+    await q.edit_message_text(
+        f"✅ Прогнозы на матч *{mid}* открыты!\n\nУчастники уведомлены.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 К списку матчей", callback_data="fut_wc_admin_list_0")],
+            [InlineKeyboardButton("◀ Управление",       callback_data="fut_wc_admin")],
+        ]),
+    )
+
+
+async def cb_fut_wc_admin_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_close_ — закрыть прогнозы на матч."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    mid = q.data[len("fut_wc_admin_close_"):]
+    wc  = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    ok = db.wc_close_match(wc["id"], mid)
+    await q.answer("🔴 Прогнозы закрыты!" if ok else "❌ Ошибка или уже закрыты", show_alert=True)
+    await q.edit_message_text(
+        f"🔴 Прогнозы на матч *{mid}* закрыты.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Ввести результат", callback_data=f"fut_wc_admin_result_{mid}")],
+            [InlineKeyboardButton("📋 К списку матчей",  callback_data="fut_wc_admin_list_0")],
+        ]),
+    )
+
+
+async def cb_fut_wc_admin_result(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_result_ — начать ввод результата матча."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    mid = q.data[len("fut_wc_admin_result_"):]
+    wc  = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+
+    hf = match.get("home_flag", "")
+    af = match.get("away_flag", "")
+
+    db.set_pending_action(uid, "wc_result_input", {"wc_id": wc["id"], "match_id": mid})
+
+    await q.edit_message_text(
+        f"📝 *Введи результат матча*\n\n"
+        f"*{hf} {match['home']}* — *{af} {match['away']}*\n\n"
+        f"Формат: `2:1` или `1:1`\n"
+        f"_(отправь счёт текстом)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data=f"fut_wc_admin_match_{mid}"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_admin_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_add$ — добавить новый матч (KO раунды)."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    await q.edit_message_text(
+        "➕ *ДОБАВИТЬ МАТЧ*\n\n"
+        "Выбери раунд:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔥 1/8 финала",         callback_data="fut_wc_admin_addround_r16")],
+            [InlineKeyboardButton("⚡ Четвертьфинал",       callback_data="fut_wc_admin_addround_qf")],
+            [InlineKeyboardButton("🌟 Полуфинал",           callback_data="fut_wc_admin_addround_sf")],
+            [InlineKeyboardButton("🥉 Матч за 3-е место",   callback_data="fut_wc_admin_addround_3rd")],
+            [InlineKeyboardButton("🏆 Финал",               callback_data="fut_wc_admin_addround_final")],
+            [InlineKeyboardButton("◀ Назад",                callback_data="fut_wc_admin")],
+        ]),
+    )
+
+
+async def cb_fut_wc_admin_addround(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_addround_ — выбран раунд, ввести команды."""
+    q     = update.callback_query
+    await q.answer()
+    uid   = q.from_user.id
+    round_key = q.data[len("fut_wc_admin_addround_"):]
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    rnd_label = WC_ROUND_LABELS.get(round_key, round_key)
+    db.set_pending_action(uid, "wc_add_match", {"wc_id": wc["id"], "round": round_key})
+
+    await q.edit_message_text(
+        f"➕ *{rnd_label}*\n\n"
+        f"Введи команды в формате:\n"
+        f"`Германия vs Аргентина`\n\n"
+        f"_(Флаги определяются автоматически)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="fut_wc_admin_add"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_admin_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_create$ — создать новый ЧМ."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    existing = db.get_active_wc()
+    if existing:
+        await q.answer(f"Уже есть активный ЧМ: {existing['id']}", show_alert=True)
+        return
+
+    await q.edit_message_text(
+        "🆕 *СОЗДАТЬ ЧЕМПИОНАТ МИРА*\n\nВыбери формат:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "🌍 Мини ЧМ (8 команд, 2 группы)",
+                callback_data="fut_wc_admin_createp_mini",
+            )],
+            [InlineKeyboardButton(
+                "🏆 Стандарт (16 команд, 4 группы)",
+                callback_data="fut_wc_admin_createp_standard",
+            )],
+            [InlineKeyboardButton("◀ Назад", callback_data="fut_wc_admin")],
+        ]),
+    )
+
+
+async def cb_fut_wc_admin_createp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_createp_ — создать ЧМ с выбранным пресетом."""
+    q       = update.callback_query
+    await q.answer()
+    uid     = q.from_user.id
+    preset  = q.data[len("fut_wc_admin_createp_"):]
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    if db.get_active_wc():
+        await q.answer("Уже есть активный ЧМ.", show_alert=True)
+        return
+
+    schedule = _wc_schedule_mini() if preset == "mini" else _wc_schedule_standard()
+    settings = {"entry_fee": 0, "prizes": WC_PRIZES_DEFAULT}
+    wc_id    = db.create_wc(uid, schedule, settings)
+
+    preset_label = "Мини ЧМ (8 команд)" if preset == "mini" else "Стандарт (16 команд)"
+    await q.edit_message_text(
+        f"✅ *{wc_id} создан!*\n\n"
+        f"Формат: _{preset_label}_\n"
+        f"Матчей в группах: *{len(schedule)}*\n\n"
+        f"Открой прогнозы на матчи через «📋 Матчи».",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛠 Управление", callback_data="fut_wc_admin")],
+            [InlineKeyboardButton("🌍 ЧМ-экран",  callback_data="fut_wc")],
+        ]),
+    )
+
+
+async def cb_fut_wc_admin_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_finish$ — завершить ЧМ и раздать призы."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+
+    wc_id    = wc["id"]
+    settings = wc.get("settings") or {}
+    prizes   = settings.get("prizes", WC_PRIZES_DEFAULT)
+    parts    = db.wc_get_participants(wc_id)
+
+    # Раздать призы топ-3
+    for i, p in enumerate(parts[:3]):
+        rank = i + 1
+        prize = prizes.get(str(rank), 0)
+        if prize > 0:
+            db.add_coins(p["user_id"], prize)
+            try:
+                await ctx.bot.send_message(
+                    chat_id=p["user_id"],
+                    text=(
+                        f"{_wc_rank_emoji(rank)} *ЧМ ЗАВЕРШЁН!*\n\n"
+                        f"Ты занял *{rank}-е место* в {wc_id}!\n"
+                        f"Приз: *+{_fmt(prize)} 💰*\n\n"
+                        f"Твои очки: *{p['total_points']}*  Точных счётов: *{p.get('exact_scores', 0)}*"
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
+    # Уведомить остальных
+    for p in parts[3:]:
+        try:
+            my_rank = next((i + 1 for i, x in enumerate(parts) if x["user_id"] == p["user_id"]), "?")
+            await ctx.bot.send_message(
+                chat_id=p["user_id"],
+                text=(
+                    f"🏁 *{wc_id} завершён!*\n\n"
+                    f"Твоё место: *#{my_rank}* | Очков: *{p['total_points']}*\n\n"
+                    f"🥇 {parts[0]['name']} — {parts[0]['total_points']} очк.\n"
+                    + (f"🥈 {parts[1]['name']} — {parts[1]['total_points']} очк.\n" if len(parts) > 1 else "")
+                    + (f"🥉 {parts[2]['name']} — {parts[2]['total_points']} очк." if len(parts) > 2 else "")
+                ),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+    db.update_wc(wc_id, status="finished")
+
+    podium = "\n".join(
+        f"{_wc_rank_emoji(i+1)} {p['name']} — {p['total_points']} очк. (+{_fmt(prizes.get(str(i+1), 0))} 💰)"
+        for i, p in enumerate(parts[:3])
+    ) or "_Нет участников_"
+
+    await q.edit_message_text(
+        f"🏆 *{wc_id} ЗАВЕРШЁН!*\n\n"
+        f"*Пьедестал:*\n{podium}\n\n"
+        f"Призы розданы. ЧМ закрыт.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ FUT меню", callback_data="fut_menu"),
+        ]]),
+    )
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  REGISTRATION
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -6526,4 +7752,24 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_exchange_claim_c2f$",      cb_fut_exchange_claim_c2f),
         ("^fut_exchange_pending$",        cb_fut_exchange_pending),
         ("^fut_exchange_cancel_",         cb_fut_exchange_cancel),
+        # ── Чемпионат мира ────────────────────────────────────────────────────
+        ("^fut_wc_admin_createp_",        cb_fut_wc_admin_createp),   # до fut_wc_admin_create$
+        ("^fut_wc_admin_create$",         cb_fut_wc_admin_create),
+        ("^fut_wc_admin_addround_",       cb_fut_wc_admin_addround),
+        ("^fut_wc_admin_add$",            cb_fut_wc_admin_add),
+        ("^fut_wc_admin_open_",           cb_fut_wc_admin_open),
+        ("^fut_wc_admin_close_",          cb_fut_wc_admin_close),
+        ("^fut_wc_admin_result_",         cb_fut_wc_admin_result),
+        ("^fut_wc_admin_match_",          cb_fut_wc_admin_match),
+        ("^fut_wc_admin_list_",           cb_fut_wc_admin_list),
+        ("^fut_wc_admin_finish$",         cb_fut_wc_admin_finish),
+        ("^fut_wc_admin$",                cb_fut_wc_admin),
+        ("^fut_wc_psave_",                cb_fut_wc_pred_save),        # до fut_wc_pw_
+        ("^fut_wc_pw_",                   cb_fut_wc_pred_winner),
+        ("^fut_wc_predict_",              cb_fut_wc_predict),
+        ("^fut_wc_schedule_",             cb_fut_wc_schedule),
+        ("^fut_wc_lb_",                   cb_fut_wc_leaderboard),
+        ("^fut_wc_mypreds_",              cb_fut_wc_mypreds),
+        ("^fut_wc_join$",                 cb_fut_wc_join),
+        ("^fut_wc$",                      cb_fut_wc),
     ]
