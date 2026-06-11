@@ -4270,7 +4270,8 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
             f"*{hf} {home}* {h_goals}:{a_goals} *{af} {away}*\n"
             f"Победитель: *{winner_text}*\n\n"
             f"📊 Прогнозов обработано: *{summary['total']}*\n"
-            f"✅ Угадали победителя: *{summary['correct_winner']}*\n"
+            f"✅ Угадали исход: *{summary['correct_winner']}*\n"
+            f"➕ Бонус за разницу: *{summary.get('correct_diff', 0)}*\n"
             f"🎯 Точный счёт: *{summary['exact_scores']}*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
@@ -4295,7 +4296,14 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
                 ph = pred.get("pred_home")
                 pa = pred.get("pred_away")
                 sc_str = f" ({ph}:{pa})" if ph is not None else ""
-                result_icon = "✅" if pts > 0 else "❌"
+                if pts == 5:
+                    result_icon, res_line = "🎯", "Точный счёт! *+5 очков*"
+                elif pts == 4:
+                    result_icon, res_line = "✅", "Исход и разница! *+4 очка*"
+                elif pts == 3:
+                    result_icon, res_line = "✅", "Исход угадан! *+3 очка*"
+                else:
+                    result_icon, res_line = "❌", "Не угадал — *0 очков*"
                 try:
                     await ctx.bot.send_message(
                         chat_id=p["user_id"],
@@ -4303,16 +4311,60 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
                             f"{result_icon} *Матч сыгран!*\n\n"
                             f"*{hf} {home}* {h_goals}:{a_goals} *{af} {away}*\n\n"
                             f"Твой прогноз: *{pw_label}*{sc_str}\n"
-                            f"Результат: *+{pts} очк.*" if pts > 0 else
-                            f"{result_icon} *Матч сыгран!*\n\n"
-                            f"*{hf} {home}* {h_goals}:{a_goals} *{af} {away}*\n\n"
-                            f"Твой прогноз: *{pw_label}*{sc_str}\n"
-                            f"Результат: *0 очков*"
+                            f"{res_line}"
                         ),
                         parse_mode="Markdown",
                     )
                 except Exception:
                     pass
+        return True
+
+    # ── ЧМ: свой счёт прогноза текстом ────────────────────────────────────────
+    if action == "wc_score_input":
+        data   = pending.get("data", {})
+        wc_id  = data.get("wc_id")
+        mid    = data.get("match_id")
+        winner = data.get("winner")
+
+        import re
+        m_score = re.match(r"^(\d{1,2})\s*[:\-\s]\s*(\d{1,2})$", text)
+        if not m_score:
+            await update.message.reply_text(
+                "❌ Формат: `4:2`", parse_mode="Markdown",
+            )
+            return True
+        h_g, a_g = int(m_score.group(1)), int(m_score.group(2))
+
+        derived = "home" if h_g > a_g else ("away" if a_g > h_g else "draw")
+        if winner and derived != winner:
+            w_labels = {"home": "победа хозяев", "draw": "ничья", "away": "победа гостей"}
+            await update.message.reply_text(
+                f"❌ Счёт {h_g}:{a_g} не соответствует выбранному исходу "
+                f"(*{w_labels.get(winner, '?')}*). Введи другой счёт.",
+                parse_mode="Markdown",
+            )
+            return True
+
+        ok, err = db.wc_submit_prediction(wc_id, uid, mid, winner or derived, h_g, a_g)
+        if not ok:
+            await update.message.reply_text(f"❌ {err}\nПопробуй другой счёт.")
+            return True
+
+        db.clear_pending_action(uid)
+        wc_d  = db.get_wc(wc_id)
+        match = next((mm for mm in ((wc_d or {}).get("schedule") or []) if mm["id"] == mid), {})
+        hf = match.get("home_flag", "")
+        af = match.get("away_flag", "")
+        await update.message.reply_text(
+            f"✅ *Прогноз сохранён!*\n\n"
+            f"*{hf} {match.get('home', '?')}* — *{af} {match.get('away', '?')}*\n"
+            f"Твой счёт: *{h_g}:{a_g}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Расписание", callback_data="fut_wc_schedule_0"),
+                InlineKeyboardButton("◀ ЧМ",          callback_data="fut_wc"),
+            ]]),
+        )
         return True
 
     # ── ЧМ: ввод команд для нового матча (суперадмин) ────────────────────────
@@ -6769,7 +6821,9 @@ async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"📊 Матчей: *{len(done_matches)}/{len(schedule)}*\n"
         f"🟢 Открыто для прогнозов: *{len(open_matches)}*\n\n"
         f"🏆 *Топ-3:*\n{top3}"
-        f"{my_line}"
+        f"{my_line}\n\n"
+        "📜 _Регламент: точный счёт — 5 • исход — 3 • разница — +1_\n"
+        "🚫 _Счета не повторяются!_"
     )
 
     kb = []
@@ -6816,6 +6870,10 @@ async def cb_fut_wc_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     settings = wc.get("settings") or {}
     fee      = settings.get("entry_fee", 0)
 
+    if db.wc_get_participant(wc_id, uid):
+        await q.answer("Ты уже участвуешь!", show_alert=True)
+        return
+
     if fee > 0:
         ok, bal = db.spend_coins(uid, fee)
         if not ok:
@@ -6825,6 +6883,8 @@ async def cb_fut_wc_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     name    = user.get("display_name") or user.get("username") or f"User{uid}"
     ok, err = db.wc_join(wc_id, uid, name)
     if not ok:
+        if fee > 0:
+            db.add_coins(uid, fee)  # вернуть взнос при неудаче
         if err == "already_joined":
             await q.answer("Ты уже участвуешь!", show_alert=True)
         else:
@@ -6864,17 +6924,22 @@ async def cb_fut_wc_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         + "\n\n*🟢* = открыт  *⏳* = предстоит  *✅* = сыгран"
     )
 
-    # Кнопки "Предсказать" для открытых матчей на странице
+    # Кнопки: прогноз для открытых, просмотр прогнозов для закрытых/сыгранных
     kb = []
     for m in page_matches:
+        hf = m.get("home_flag", "")
+        af = m.get("away_flag", "")
         if m.get("status") == "open":
-            hf   = m.get("home_flag", "")
-            af   = m.get("away_flag", "")
             pred = my_preds.get(m["id"])
             mark = " ✔" if pred and not pred.get("resolved") else ""
             kb.append([InlineKeyboardButton(
                 f"🎯 {hf}{m['home']} — {af}{m['away']}{mark}",
                 callback_data=f"fut_wc_predict_{m['id']}",
+            )])
+        elif m.get("status") in ("closed", "done"):
+            kb.append([InlineKeyboardButton(
+                f"👁 {hf}{m['home']} — {af}{m['away']}",
+                callback_data=f"fut_wc_preds_{m['id']}",
             )])
 
     nav = []
@@ -6936,7 +7001,8 @@ async def cb_fut_wc_predict(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         f"*{hf} {home}*  vs  *{af} {away}*\n"
         f"_{rnd}{grp}_"
         f"{existing_str}\n\n"
-        "Выбери победителя:"
+        "_📜 точный счёт — 5 очков • исход — 3 • +1 за разницу_\n\n"
+        "Выбери исход:"
     )
 
     kb = [
@@ -6977,37 +7043,42 @@ async def cb_fut_wc_pred_winner(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     away = match["away"]
     w_label = {"home": f"{hf} {home}", "draw": "🤝 Ничья", "away": f"{af} {away}"}.get(winner, "?")
 
+    # Регламент: счета не повторяются — помечаем занятые другими участниками
+    all_preds = db.wc_get_match_predictions(wc_id, mid)
+    taken = {(p["pred_home"], p["pred_away"]) for p in all_preds
+             if p["user_id"] != uid and p.get("pred_home") is not None}
+
     text = (
         f"🎯 *{hf} {home} — {af} {away}*\n\n"
         f"Выбрано: *{w_label}*\n\n"
-        "Угадай точный счёт (*+2 бонусных очка*):"
+        "Теперь выбери точный счёт:\n"
+        "_📜 точный счёт — 5 • исход — 3 • +1 за разницу_\n"
+        "_🚫 — счёт занят другим участником_"
     )
+
+    def _score_btn(h_g: int, a_g: int) -> InlineKeyboardButton:
+        if (h_g, a_g) in taken:
+            return InlineKeyboardButton(f"🚫 {h_g}:{a_g}", callback_data="fut_wc_taken")
+        return InlineKeyboardButton(
+            f"{h_g}:{a_g}",
+            callback_data=f"fut_wc_psave_{mid}_{winner}_{h_g}_{a_g}",
+        )
 
     kb = []
     if winner == "draw":
-        for g in range(4):
-            kb.append([InlineKeyboardButton(
-                f"{g}:{g}",
-                callback_data=f"fut_wc_psave_{mid}_{winner}_{g}_{g}",
-            )])
+        kb.append([_score_btn(g, g) for g in range(4)])
     else:
-        # Показываем типичные счета для победителя
         win_goals_opts = [1, 2, 3, 4]
         rows_scores = []
         for wg in win_goals_opts:
             for lg in range(min(wg, 3)):
                 h_g = wg if winner == "home" else lg
                 a_g = wg if winner == "away" else lg
-                rows_scores.append(InlineKeyboardButton(
-                    f"{h_g}:{a_g}",
-                    callback_data=f"fut_wc_psave_{mid}_{winner}_{h_g}_{a_g}",
-                ))
-        # Раскладываем по 3 в ряд
+                rows_scores.append(_score_btn(h_g, a_g))
         for i in range(0, len(rows_scores), 3):
             kb.append(rows_scores[i:i + 3])
 
-    # Сохранить без точного счёта
-    kb.append([InlineKeyboardButton("💾 Без счёта", callback_data=f"fut_wc_psave_{mid}_{winner}_-1_-1")])
+    kb.append([InlineKeyboardButton("✏️ Свой счёт", callback_data=f"fut_wc_custom_{mid}_{winner}")])
     kb.append([InlineKeyboardButton("◀ Назад",      callback_data=f"fut_wc_predict_{mid}")])
 
     await q.edit_message_text(text, parse_mode="Markdown",
@@ -7024,6 +7095,10 @@ async def cb_fut_wc_pred_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
     mid, winner, h_str, a_str = parts[0], parts[1], parts[2], parts[3]
     pred_h = int(h_str) if h_str != "-1" else None
     pred_a = int(a_str) if a_str != "-1" else None
+
+    if pred_h is None or pred_a is None:
+        await q.answer("По регламенту нужно выбрать точный счёт!", show_alert=True)
+        return
 
     wc = db.get_active_wc()
     if not wc:
@@ -7066,6 +7141,143 @@ async def cb_fut_wc_pred_save(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         + (f"Осталось открытых матчей: *{len(open_remaining)}*" if open_remaining else "_Больше открытых матчей нет_"),
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_wc_taken(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_taken$ — нажатие на занятый счёт."""
+    await update.callback_query.answer(
+        "🚫 Этот счёт уже занят другим участником!\n"
+        "По регламенту счета не повторяются.",
+        show_alert=True,
+    )
+
+
+async def cb_fut_wc_custom(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_custom_ — ввести свой счёт текстом."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    # fut_wc_custom_{mid}_{winner}
+    tail   = q.data[len("fut_wc_custom_"):]
+    ridx   = tail.rfind("_")
+    mid    = tail[:ridx]
+    winner = tail[ridx + 1:]
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match or match.get("status") != "open":
+        await q.answer("Прогнозы на этот матч недоступны.", show_alert=True)
+        return
+
+    all_preds = db.wc_get_match_predictions(wc["id"], mid)
+    taken = sorted(
+        {(p["pred_home"], p["pred_away"]) for p in all_preds
+         if p["user_id"] != uid and p.get("pred_home") is not None}
+    )
+    taken_str = ", ".join(f"{h}:{a}" for h, a in taken) if taken else "пока нет"
+
+    w_labels = {"home": "победа хозяев", "draw": "ничья", "away": "победа гостей"}
+    db.set_pending_action(uid, "wc_score_input", {
+        "wc_id": wc["id"], "match_id": mid, "winner": winner,
+    })
+
+    hf = match.get("home_flag", "")
+    af = match.get("away_flag", "")
+    await q.edit_message_text(
+        f"✏️ *СВОЙ СЧЁТ*\n\n"
+        f"*{hf} {match['home']}* — *{af} {match['away']}*\n"
+        f"Исход: *{w_labels.get(winner, '?')}*\n\n"
+        f"🚫 Заняты: {taken_str}\n\n"
+        f"Отправь счёт текстом, например `4:2`\n"
+        f"_(счёт должен соответствовать выбранному исходу)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data=f"fut_wc_inpcancel_{mid}"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_inpcancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_inpcancel_ — отмена текстового ввода счёта."""
+    q   = update.callback_query
+    await q.answer("Отменено")
+    uid = q.from_user.id
+    mid = q.data[len("fut_wc_inpcancel_"):]
+
+    pending = db.get_pending_action(uid)
+    if pending and pending.get("action") == "wc_score_input":
+        db.clear_pending_action(uid)
+
+    await q.edit_message_text(
+        "Ввод счёта отменён.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 К прогнозу",  callback_data=f"fut_wc_predict_{mid}")],
+            [InlineKeyboardButton("📋 Расписание",  callback_data="fut_wc_schedule_0")],
+        ]),
+    )
+
+
+async def cb_fut_wc_preds(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_preds_ — прогнозы всех участников (для закрытых/сыгранных матчей)."""
+    q   = update.callback_query
+    await q.answer()
+    mid = q.data[len("fut_wc_preds_"):]
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    wc_id = wc["id"]
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+    if match.get("status") == "open":
+        await q.answer("Прогнозы участников скрыты, пока матч открыт!", show_alert=True)
+        return
+
+    preds = db.wc_get_match_predictions(wc_id, mid)
+    parts = db.wc_get_participants(wc_id)
+    names = {p["user_id"]: p["name"] for p in parts}
+
+    hf, af  = match.get("home_flag", ""), match.get("away_flag", "")
+    is_done = match.get("status") == "done"
+    score_str = (
+        f" — *{match['home_goals']}:{match['away_goals']}*"
+        if is_done and match.get("home_goals") is not None else ""
+    )
+
+    if is_done:
+        preds.sort(key=lambda p: -p.get("points_earned", 0))
+    else:
+        preds.sort(key=lambda p: names.get(p["user_id"], ""))
+
+    lines = []
+    for p in preds:
+        name   = names.get(p["user_id"], f"User{p['user_id']}")
+        ph, pa = p.get("pred_home"), p.get("pred_away")
+        sc = f"{ph}:{pa}" if ph is not None else \
+             {"home": "П1", "away": "П2", "draw": "Х"}.get(p.get("pred_winner"), "?")
+        if is_done:
+            pts  = p.get("points_earned", 0)
+            icon = "🎯" if pts == 5 else ("✅" if pts > 0 else "❌")
+            lines.append(f"{icon} {name}: {sc} → *+{pts}*")
+        else:
+            lines.append(f"• {name}: {sc}")
+
+    await q.edit_message_text(
+        f"👁 *ПРОГНОЗЫ — {mid}*\n\n"
+        f"{hf}{match['home']} — {af}{match['away']}{score_str}\n\n"
+        + ("\n".join(lines) or "_Никто не сделал прогноз_"),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ Расписание", callback_data="fut_wc_schedule_0"),
+        ]]),
     )
 
 
@@ -7764,6 +7976,10 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_wc_admin_list_",           cb_fut_wc_admin_list),
         ("^fut_wc_admin_finish$",         cb_fut_wc_admin_finish),
         ("^fut_wc_admin$",                cb_fut_wc_admin),
+        ("^fut_wc_taken$",                cb_fut_wc_taken),
+        ("^fut_wc_custom_",               cb_fut_wc_custom),
+        ("^fut_wc_inpcancel_",            cb_fut_wc_inpcancel),
+        ("^fut_wc_preds_",                cb_fut_wc_preds),            # просмотр прогнозов
         ("^fut_wc_psave_",                cb_fut_wc_pred_save),        # до fut_wc_pw_
         ("^fut_wc_pw_",                   cb_fut_wc_pred_winner),
         ("^fut_wc_predict_",              cb_fut_wc_predict),

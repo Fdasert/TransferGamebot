@@ -1150,6 +1150,18 @@ def wc_submit_prediction(
         return False, "Прогнозы на этот матч закрыты"
     if not wc_get_participant(wc_id, uid):
         return False, "Сначала вступи в ЧМ!"
+    if pred_home is None or pred_away is None:
+        return False, "По регламенту нужно указать точный счёт"
+    # Регламент: счета не повторяются — проверяем, не занят ли счёт другим участником
+    taken = (
+        get_client().table("wc_predictions").select("user_id")
+        .eq("wc_id", wc_id).eq("match_id", match_id)
+        .eq("pred_home", pred_home).eq("pred_away", pred_away)
+        .neq("user_id", uid)
+        .execute()
+    )
+    if taken.data:
+        return False, f"Счёт {pred_home}:{pred_away} уже занят другим участником!"
     try:
         existing = (
             get_client().table("wc_predictions").select("wc_id")
@@ -1170,7 +1182,19 @@ def wc_submit_prediction(
             }).execute()
         return True, "ok"
     except Exception as e:
+        err_s = str(e).lower()
+        if "duplicate" in err_s or "unique" in err_s:
+            return False, f"Счёт {pred_home}:{pred_away} уже занят другим участником!"
         return False, str(e)
+
+
+def wc_get_match_predictions(wc_id: str, match_id: str) -> list[dict]:
+    """Все прогнозы на конкретный матч (для проверки занятых счетов / просмотра)."""
+    res = (
+        get_client().table("wc_predictions").select("*")
+        .eq("wc_id", wc_id).eq("match_id", match_id).execute()
+    )
+    return res.data or []
 
 
 def wc_get_user_predictions(wc_id: str, uid: int) -> dict[str, dict]:
@@ -1206,17 +1230,25 @@ def wc_set_match_result(wc_id: str, match_id: str, home_goals: int, away_goals: 
         .eq("wc_id", wc_id).eq("match_id", match_id).eq("resolved", False).execute()
     )
     predictions = res.data or []
-    summary = {"ok": True, "total": len(predictions), "correct_winner": 0, "exact_scores": 0}
+    actual_diff = home_goals - away_goals
+    summary = {"ok": True, "total": len(predictions),
+               "correct_winner": 0, "correct_diff": 0, "exact_scores": 0}
 
+    # Регламент: точный счёт — 5, исход — 3, угаданная разница — +1
     for pred in predictions:
         pts = 0
+        ph = pred.get("pred_home")
+        pa = pred.get("pred_away")
         if pred["pred_winner"] == actual_winner:
-            pts = 3
             summary["correct_winner"] += 1
-            if (pred.get("pred_home") is not None and pred.get("pred_away") is not None
-                    and pred["pred_home"] == home_goals and pred["pred_away"] == away_goals):
+            if ph is not None and pa is not None and ph == home_goals and pa == away_goals:
                 pts = 5
                 summary["exact_scores"] += 1
+            else:
+                pts = 3
+                if ph is not None and pa is not None and (ph - pa) == actual_diff:
+                    pts += 1
+                    summary["correct_diff"] += 1
 
         get_client().table("wc_predictions").update({
             "points_earned": pts, "resolved": True,
