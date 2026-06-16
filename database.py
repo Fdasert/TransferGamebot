@@ -1134,6 +1134,32 @@ def create_wc(admin_uid: int, schedule: list, settings: dict) -> str:
     return wc_id
 
 
+def ensure_wc(created_by: int, schedule: list, settings: dict,
+              wc_id: str = "WC-2026") -> dict | None:
+    """Гарантирует существование канонического ЧМ (лениво создаёт при первом доступе).
+
+    Режим не создаётся вручную — он просто существует. Если канонический кубок
+    уже есть (в любом статусе), новый не создаётся. Возвращает активный ЧМ.
+    """
+    from datetime import datetime, timezone
+    existing = (
+        get_client().table("wc_cups").select("id").eq("id", wc_id).execute()
+    )
+    if not existing.data:
+        try:
+            get_client().table("wc_cups").insert({
+                "id": wc_id,
+                "created_by": created_by,
+                "status": "active",
+                "schedule": schedule,
+                "settings": settings,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except Exception:
+            pass  # гонка: другой клиент уже вставил — просто читаем ниже
+    return get_active_wc()
+
+
 def update_wc(wc_id: str, **fields) -> None:
     get_client().table("wc_cups").update(fields).eq("id", wc_id).execute()
 
