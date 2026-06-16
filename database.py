@@ -1066,18 +1066,56 @@ def cancel_fut_to_cube_transfer(transfer_id: int, user_id: int) -> tuple[bool, s
 
 # ── World Cup Predictions ─────────────────────────────────────────────────────
 
+def wc_match_status(m: dict) -> str:
+    """Вычисляет эффективный статус матча (lazy, без фоновых задач).
+
+    upcoming — команды не определены (TBD плей-офф) или матч ещё рано
+    open     — приём прогнозов (до начала матча)
+    closed   — матч начался / закрыт админом, ждёт результата
+    done     — результат внесён
+    """
+    from datetime import datetime, timezone
+    home = m.get("home")
+    away = m.get("away")
+    if not home or not away or home in ("?", "TBD", "") or away in ("?", "TBD", ""):
+        return "upcoming"
+    if m.get("home_goals") is not None and m.get("away_goals") is not None:
+        return "done"
+    if m.get("locked"):
+        return "closed"
+    ko = m.get("kickoff")
+    if ko:
+        try:
+            kt = datetime.fromisoformat(ko)
+            if kt.tzinfo is None:
+                kt = kt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= kt:
+                return "closed"
+        except Exception:
+            pass
+    return "open"
+
+
+def _wc_inject_status(wc: dict | None) -> dict | None:
+    """Проставляет вычисленный статус каждому матчу расписания (in-memory)."""
+    if wc:
+        for m in (wc.get("schedule") or []):
+            m["status"] = wc_match_status(m)
+    return wc
+
+
 def get_active_wc() -> dict | None:
     res = (
         get_client().table("wc_cups")
         .select("*").neq("status", "finished")
         .order("created_at", desc=True).limit(1).execute()
     )
-    return res.data[0] if res.data else None
+    return _wc_inject_status(res.data[0] if res.data else None)
 
 
 def get_wc(wc_id: str) -> dict | None:
     res = get_client().table("wc_cups").select("*").eq("id", wc_id).execute()
-    return res.data[0] if res.data else None
+    return _wc_inject_status(res.data[0] if res.data else None)
 
 
 def create_wc(admin_uid: int, schedule: list, settings: dict) -> str:
@@ -1205,12 +1243,26 @@ def wc_get_user_predictions(wc_id: str, uid: int) -> dict[str, dict]:
     return {p["match_id"]: p for p in (res.data or [])}
 
 
+def _wc_score_pred(pred: dict, home_goals: int, away_goals: int) -> int:
+    """Очки по регламенту: точный счёт — 5, исход — 3, угаданная разница — +1."""
+    actual_winner = "home" if home_goals > away_goals else ("away" if away_goals > home_goals else "draw")
+    actual_diff   = home_goals - away_goals
+    ph = pred.get("pred_home")
+    pa = pred.get("pred_away")
+    if pred["pred_winner"] != actual_winner:
+        return 0
+    if ph is not None and pa is not None and ph == home_goals and pa == away_goals:
+        return 5
+    pts = 3
+    if ph is not None and pa is not None and (ph - pa) == actual_diff:
+        pts += 1
+    return pts
+
+
 def wc_set_match_result(wc_id: str, match_id: str, home_goals: int, away_goals: int) -> dict:
     wc = get_wc(wc_id)
     if not wc:
         return {"ok": False, "err": "WC not found"}
-
-    actual_winner = "home" if home_goals > away_goals else ("away" if away_goals > home_goals else "draw")
 
     schedule = wc.get("schedule") or []
     match_found = False
@@ -1225,67 +1277,77 @@ def wc_set_match_result(wc_id: str, match_id: str, home_goals: int, away_goals: 
         return {"ok": False, "err": "Match not found"}
     update_wc(wc_id, schedule=schedule)
 
+    # Берём ВСЕ прогнозы (в т.ч. уже подведённые — для исправления результата)
     res = (
         get_client().table("wc_predictions").select("*")
-        .eq("wc_id", wc_id).eq("match_id", match_id).eq("resolved", False).execute()
+        .eq("wc_id", wc_id).eq("match_id", match_id).execute()
     )
     predictions = res.data or []
-    actual_diff = home_goals - away_goals
     summary = {"ok": True, "total": len(predictions),
                "correct_winner": 0, "correct_diff": 0, "exact_scores": 0}
 
-    # Регламент: точный счёт — 5, исход — 3, угаданная разница — +1
     for pred in predictions:
-        pts = 0
-        ph = pred.get("pred_home")
-        pa = pred.get("pred_away")
-        if pred["pred_winner"] == actual_winner:
+        old_pts = pred.get("points_earned", 0) if pred.get("resolved") else 0
+        new_pts = _wc_score_pred(pred, home_goals, away_goals)
+
+        if new_pts > 0:
             summary["correct_winner"] += 1
-            if ph is not None and pa is not None and ph == home_goals and pa == away_goals:
-                pts = 5
+            if new_pts == 5:
                 summary["exact_scores"] += 1
-            else:
-                pts = 3
-                if ph is not None and pa is not None and (ph - pa) == actual_diff:
-                    pts += 1
-                    summary["correct_diff"] += 1
+            elif new_pts == 4:
+                summary["correct_diff"] += 1
 
         get_client().table("wc_predictions").update({
-            "points_earned": pts, "resolved": True,
+            "points_earned": new_pts, "resolved": True,
         }).eq("wc_id", wc_id).eq("user_id", pred["user_id"]).eq("match_id", match_id).execute()
 
-        if pts > 0:
+        # Корректируем баланс участника на дельту (поддержка исправления)
+        delta_pts   = new_pts - old_pts
+        old_exact   = 1 if old_pts == 5 else 0
+        new_exact   = 1 if new_pts == 5 else 0
+        delta_exact = new_exact - old_exact
+        if delta_pts != 0 or delta_exact != 0:
             part = wc_get_participant(wc_id, pred["user_id"])
             if part:
                 get_client().table("wc_participants").update({
-                    "total_points": part["total_points"] + pts,
-                    "exact_scores": part["exact_scores"] + (1 if pts == 5 else 0),
+                    "total_points": part["total_points"] + delta_pts,
+                    "exact_scores": max(0, part["exact_scores"] + delta_exact),
                 }).eq("wc_id", wc_id).eq("user_id", pred["user_id"]).execute()
 
     return summary
 
 
-def wc_open_match(wc_id: str, match_id: str) -> bool:
+def wc_set_lock(wc_id: str, match_id: str, locked: bool) -> bool:
+    """Ручной override админа: закрыть (locked=True) / снять закрытие (False)."""
     wc = get_wc(wc_id)
     if not wc:
         return False
     schedule = wc.get("schedule") or []
     for m in schedule:
         if m["id"] == match_id:
-            m["status"] = "open"
+            m["locked"] = locked
             update_wc(wc_id, schedule=schedule)
             return True
     return False
 
 
-def wc_close_match(wc_id: str, match_id: str) -> bool:
+def wc_set_match_teams(wc_id: str, match_id: str,
+                       home: str, home_flag: str,
+                       away: str, away_flag: str,
+                       kickoff: str | None = None) -> bool:
+    """Задать команды для матча (плей-офф TBD → реальные команды)."""
     wc = get_wc(wc_id)
     if not wc:
         return False
     schedule = wc.get("schedule") or []
     for m in schedule:
-        if m["id"] == match_id and m.get("status") == "open":
-            m["status"] = "closed"
+        if m["id"] == match_id:
+            m["home"] = home
+            m["home_flag"] = home_flag
+            m["away"] = away
+            m["away_flag"] = away_flag
+            if kickoff:
+                m["kickoff"] = kickoff
             update_wc(wc_id, schedule=schedule)
             return True
     return False

@@ -4416,6 +4416,42 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
         )
         return True
 
+    # ── ЧМ: задать команды существующему матчу (плей-офф) ─────────────────────
+    if action == "wc_teams_input":
+        data     = pending.get("data", {})
+        wc_id    = data.get("wc_id")
+        match_id = data.get("match_id")
+
+        import re
+        m_teams = re.split(r"\s+(?:vs\.?|-|—|–)\s+", text.strip(), maxsplit=1, flags=re.IGNORECASE)
+        if len(m_teams) != 2 or not m_teams[0].strip() or not m_teams[1].strip():
+            await update.message.reply_text(
+                "❌ Формат: `Бразилия - Франция`", parse_mode="Markdown",
+            )
+            return True
+
+        home_team = m_teams[0].strip()
+        away_team = m_teams[1].strip()
+        hf = _team_flag(home_team)
+        af = _team_flag(away_team)
+
+        db.clear_pending_action(uid)
+        ok = db.wc_set_match_teams(wc_id, match_id, home_team, hf, away_team, af)
+        if not ok:
+            await update.message.reply_text("❌ Не удалось сохранить (матч не найден).")
+            return True
+
+        await update.message.reply_text(
+            f"✅ *Команды заданы!*\n\n"
+            f"`{match_id}`: *{hf} {home_team}* — *{af} {away_team}*\n\n"
+            f"Прогнозы откроются автоматически до начала матча.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ К матчу", callback_data=f"fut_wc_admin_match_{match_id}"),
+            ]]),
+        )
+        return True
+
     # ── FUT→CUB обменник ──────────────────────────────────────────────────────
     if action == "fut_exchange_amount":
         try:
@@ -6630,6 +6666,7 @@ async def cb_fut_exchange_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 
 WC_ROUND_LABELS: dict[str, str] = {
     "group": "Групповой этап",
+    "r32":   "1/16 финала",
     "r16":   "1/8 финала",
     "qf":    "Четвертьфинал",
     "sf":    "Полуфинал",
@@ -6637,7 +6674,7 @@ WC_ROUND_LABELS: dict[str, str] = {
     "final": "Финал",
 }
 WC_ROUND_EMOJI: dict[str, str] = {
-    "group": "🏟", "r16": "🔥", "qf": "⚡",
+    "group": "🏟", "r32": "🔥", "r16": "⚔️", "qf": "⚡",
     "sf": "🌟", "3rd": "🥉", "final": "🏆",
 }
 WC_STATUS_EMOJI: dict[str, str] = {
@@ -6645,25 +6682,42 @@ WC_STATUS_EMOJI: dict[str, str] = {
 }
 WC_PRIZES_DEFAULT: dict[str, int] = {"1": 50_000, "2": 25_000, "3": 10_000}
 
-_TEAM_FLAGS: dict[str, str] = {
-    "бразилия": "🇧🇷", "германия": "🇩🇪", "аргентина": "🇦🇷",
-    "франция": "🇫🇷", "испания": "🇪🇸", "португалия": "🇵🇹",
-    "нидерланды": "🇳🇱", "голландия": "🇳🇱", "англия": "🏴󠁧󠁢󠁥󠁮󠁧󠁿",
-    "бельгия": "🇧🇪", "хорватия": "🇭🇷", "сенегал": "🇸🇳",
-    "мексика": "🇲🇽", "уругвай": "🇺🇾", "япония": "🇯🇵",
-    "марокко": "🇲🇦", "южная корея": "🇰🇷", "корея": "🇰🇷",
-    "италия": "🇮🇹", "швейцария": "🇨🇭", "дания": "🇩🇰",
-    "швеция": "🇸🇪", "польша": "🇵🇱", "австрия": "🇦🇹",
-    "сербия": "🇷🇸", "турция": "🇹🇷", "украина": "🇺🇦",
-    "греция": "🇬🇷", "шотландия": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "ирландия": "🇮🇪",
-    "австралия": "🇦🇺", "сша": "🇺🇸", "канада": "🇨🇦",
-    "эквадор": "🇪🇨", "колумбия": "🇨🇴", "чили": "🇨🇱",
-    "гана": "🇬🇭", "нигерия": "🇳🇬", "камерун": "🇨🇲",
-    "египет": "🇪🇬", "тунис": "🇹🇳", "иран": "🇮🇷",
-    "саудовская аравия": "🇸🇦", "катар": "🇶🇦", "китай": "🇨🇳",
+# Реальные сборные ЧМ-2026: англ. имя → (рус. имя, флаг)
+_WC_TEAMS: dict[str, tuple[str, str]] = {
+    "Mexico": ("Мексика", "🇲🇽"), "South Africa": ("ЮАР", "🇿🇦"),
+    "South Korea": ("Южная Корея", "🇰🇷"), "Czechia": ("Чехия", "🇨🇿"),
+    "Canada": ("Канада", "🇨🇦"), "Switzerland": ("Швейцария", "🇨🇭"),
+    "Qatar": ("Катар", "🇶🇦"), "Bosnia and Herzegovina": ("Босния", "🇧🇦"),
+    "Brazil": ("Бразилия", "🇧🇷"), "Morocco": ("Марокко", "🇲🇦"),
+    "Scotland": ("Шотландия", "🏴󠁧󠁢󠁳󠁣󠁴󠁿"), "Haiti": ("Гаити", "🇭🇹"),
+    "United States": ("США", "🇺🇸"), "Australia": ("Австралия", "🇦🇺"),
+    "Paraguay": ("Парагвай", "🇵🇾"), "Türkiye": ("Турция", "🇹🇷"),
+    "Germany": ("Германия", "🇩🇪"), "Ecuador": ("Эквадор", "🇪🇨"),
+    "Ivory Coast": ("Кот-д'Ивуар", "🇨🇮"), "Curaçao": ("Кюрасао", "🇨🇼"),
+    "Netherlands": ("Нидерланды", "🇳🇱"), "Japan": ("Япония", "🇯🇵"),
+    "Tunisia": ("Тунис", "🇹🇳"), "Sweden": ("Швеция", "🇸🇪"),
+    "Belgium": ("Бельгия", "🇧🇪"), "Iran": ("Иран", "🇮🇷"),
+    "Egypt": ("Египет", "🇪🇬"), "New Zealand": ("Новая Зеландия", "🇳🇿"),
+    "Spain": ("Испания", "🇪🇸"), "Uruguay": ("Уругвай", "🇺🇾"),
+    "Saudi Arabia": ("Саудовская Аравия", "🇸🇦"), "Cape Verde": ("Кабо-Верде", "🇨🇻"),
+    "France": ("Франция", "🇫🇷"), "Senegal": ("Сенегал", "🇸🇳"),
+    "Norway": ("Норвегия", "🇳🇴"), "Iraq": ("Ирак", "🇮🇶"),
+    "Argentina": ("Аргентина", "🇦🇷"), "Austria": ("Австрия", "🇦🇹"),
+    "Algeria": ("Алжир", "🇩🇿"), "Jordan": ("Иордания", "🇯🇴"),
+    "Portugal": ("Португалия", "🇵🇹"), "Colombia": ("Колумбия", "🇨🇴"),
+    "Uzbekistan": ("Узбекистан", "🇺🇿"), "DR Congo": ("ДР Конго", "🇨🇩"),
+    "England": ("Англия", "🏴󠁧󠁢󠁥󠁮󠁧󠁿"), "Croatia": ("Хорватия", "🇭🇷"),
+    "Panama": ("Панама", "🇵🇦"), "Ghana": ("Гана", "🇬🇭"),
 }
 
-WC_SCHED_PAGE = 6  # матчей на страницу расписания
+# Рус. имя → флаг (для ручного ввода команд админом в плей-офф)
+_TEAM_FLAGS: dict[str, str] = {ru.lower(): flag for ru, flag in _WC_TEAMS.values()}
+_TEAM_FLAGS.update({
+    "босния и герцеговина": "🇧🇦", "кот д'ивуар": "🇨🇮", "кот-д’ивуар": "🇨🇮",
+    "корея": "🇰🇷", "сша": "🇺🇸",
+})
+
+WC_SCHED_PAGE = 6   # матчей на страницу расписания
 WC_LB_PAGE    = 10  # участников на страницу таблицы
 
 
@@ -6671,71 +6725,167 @@ def _team_flag(name: str) -> str:
     return _TEAM_FLAGS.get(name.lower().strip(), "🏳")
 
 
-def _wc_schedule_mini() -> list[dict]:
-    def _m(mid, rnd, grp, h, a):
-        return {
-            "id": mid, "round": rnd, "group": grp,
-            "home": h, "home_flag": _team_flag(h),
-            "away": a, "away_flag": _team_flag(a),
-            "status": "upcoming", "home_goals": None, "away_goals": None,
-        }
-    return [
-        _m("A1","group","A","Бразилия","Германия"),
-        _m("A2","group","A","Япония","Марокко"),
-        _m("A3","group","A","Бразилия","Япония"),
-        _m("A4","group","A","Германия","Марокко"),
-        _m("A5","group","A","Бразилия","Марокко"),
-        _m("A6","group","A","Германия","Япония"),
-        _m("B1","group","B","Аргентина","Франция"),
-        _m("B2","group","B","Испания","Португалия"),
-        _m("B3","group","B","Аргентина","Испания"),
-        _m("B4","group","B","Франция","Португалия"),
-        _m("B5","group","B","Аргентина","Португалия"),
-        _m("B6","group","B","Испания","Франция"),
-    ]
+def _wc_et_to_utc_iso(date_str: str, et_time: str) -> str:
+    """ET (EDT=UTC-4) → UTC ISO."""
+    from datetime import datetime, timedelta, timezone
+    dt = datetime.fromisoformat(f"{date_str}T{et_time}:00") + timedelta(hours=4)
+    return dt.replace(tzinfo=timezone.utc).isoformat()
 
 
-def _wc_schedule_standard() -> list[dict]:
-    def _m(mid, rnd, grp, h, a):
-        return {
-            "id": mid, "round": rnd, "group": grp,
-            "home": h, "home_flag": _team_flag(h),
-            "away": a, "away_flag": _team_flag(a),
-            "status": "upcoming", "home_goals": None, "away_goals": None,
-        }
-    return [
-        _m("A1","group","A","Бразилия","Германия"),
-        _m("A2","group","A","Япония","Марокко"),
-        _m("A3","group","A","Бразилия","Япония"),
-        _m("A4","group","A","Германия","Марокко"),
-        _m("A5","group","A","Бразилия","Марокко"),
-        _m("A6","group","A","Германия","Япония"),
-        _m("B1","group","B","Аргентина","Франция"),
-        _m("B2","group","B","Испания","Португалия"),
-        _m("B3","group","B","Аргентина","Испания"),
-        _m("B4","group","B","Франция","Португалия"),
-        _m("B5","group","B","Аргентина","Португалия"),
-        _m("B6","group","B","Испания","Франция"),
-        _m("C1","group","C","Бельгия","Хорватия"),
-        _m("C2","group","C","Сенегал","Мексика"),
-        _m("C3","group","C","Бельгия","Сенегал"),
-        _m("C4","group","C","Хорватия","Мексика"),
-        _m("C5","group","C","Бельгия","Мексика"),
-        _m("C6","group","C","Хорватия","Сенегал"),
-        _m("D1","group","D","Нидерланды","Англия"),
-        _m("D2","group","D","Уругвай","Южная Корея"),
-        _m("D3","group","D","Нидерланды","Уругвай"),
-        _m("D4","group","D","Англия","Южная Корея"),
-        _m("D5","group","D","Нидерланды","Южная Корея"),
-        _m("D6","group","D","Англия","Уругвай"),
-    ]
+# Реальный календарь группового этапа ЧМ-2026 (по данным ESPN; время ET).
+# (дата, время ET, группа, хозяева, гости, результат|None)
+_WC_GROUP_FIXTURES: list[tuple] = [
+    ("2026-06-11","20:00","A","Mexico","South Africa",(2,0)),
+    ("2026-06-11","23:00","A","South Korea","Czechia",(2,1)),
+    ("2026-06-12","18:00","B","Canada","Bosnia and Herzegovina",(1,1)),
+    ("2026-06-12","21:00","D","United States","Paraguay",(4,1)),
+    ("2026-06-13","15:00","B","Qatar","Switzerland",(1,1)),
+    ("2026-06-13","18:00","C","Brazil","Morocco",(1,1)),
+    ("2026-06-13","15:00","C","Haiti","Scotland",(0,1)),
+    ("2026-06-14","00:00","D","Australia","Türkiye",(2,0)),
+    ("2026-06-14","17:00","E","Germany","Curaçao",(7,1)),
+    ("2026-06-14","18:00","F","Netherlands","Japan",(2,2)),
+    ("2026-06-14","19:00","E","Ivory Coast","Ecuador",(1,0)),
+    ("2026-06-14","22:00","F","Sweden","Tunisia",(5,1)),
+    ("2026-06-15","15:00","H","Spain","Cape Verde",(0,0)),
+    ("2026-06-15","18:00","G","Belgium","Egypt",(1,1)),
+    ("2026-06-15","18:00","H","Saudi Arabia","Uruguay",(1,1)),
+    ("2026-06-16","00:00","G","Iran","New Zealand",(2,2)),
+    ("2026-06-16","15:00","I","France","Senegal",None),
+    ("2026-06-16","18:00","I","Iraq","Norway",None),
+    ("2026-06-16","21:00","J","Argentina","Algeria",None),
+    ("2026-06-17","00:00","J","Austria","Jordan",None),
+    ("2026-06-17","13:00","K","Portugal","DR Congo",None),
+    ("2026-06-17","16:00","L","England","Croatia",None),
+    ("2026-06-17","19:00","L","Ghana","Panama",None),
+    ("2026-06-17","22:00","K","Uzbekistan","Colombia",None),
+    ("2026-06-18","12:00","A","Czechia","South Africa",None),
+    ("2026-06-18","15:00","B","Switzerland","Bosnia and Herzegovina",None),
+    ("2026-06-18","18:00","B","Canada","Qatar",None),
+    ("2026-06-18","23:00","A","Mexico","South Korea",None),
+    ("2026-06-19","15:00","D","United States","Australia",None),
+    ("2026-06-19","18:00","C","Scotland","Morocco",None),
+    ("2026-06-19","21:00","C","Brazil","Haiti",None),
+    ("2026-06-20","00:00","D","Türkiye","Paraguay",None),
+    ("2026-06-20","13:00","F","Netherlands","Sweden",None),
+    ("2026-06-20","16:00","E","Germany","Ivory Coast",None),
+    ("2026-06-20","20:00","E","Ecuador","Curaçao",None),
+    ("2026-06-21","00:00","F","Tunisia","Japan",None),
+    ("2026-06-21","12:00","H","Spain","Saudi Arabia",None),
+    ("2026-06-21","15:00","G","Belgium","Iran",None),
+    ("2026-06-21","18:00","H","Uruguay","Cape Verde",None),
+    ("2026-06-21","21:00","G","New Zealand","Egypt",None),
+    ("2026-06-22","13:00","J","Argentina","Austria",None),
+    ("2026-06-22","17:00","I","France","Iraq",None),
+    ("2026-06-22","20:00","I","Norway","Senegal",None),
+    ("2026-06-22","23:00","J","Jordan","Algeria",None),
+    ("2026-06-23","13:00","K","Portugal","Uzbekistan",None),
+    ("2026-06-23","16:00","L","England","Ghana",None),
+    ("2026-06-23","19:00","L","Panama","Croatia",None),
+    ("2026-06-23","22:00","K","Colombia","DR Congo",None),
+    ("2026-06-24","15:00","B","Switzerland","Canada",None),
+    ("2026-06-24","15:00","B","Bosnia and Herzegovina","Qatar",None),
+    ("2026-06-24","18:00","C","Scotland","Brazil",None),
+    ("2026-06-24","18:00","C","Morocco","Haiti",None),
+    ("2026-06-24","21:00","A","Czechia","Mexico",None),
+    ("2026-06-24","21:00","A","South Africa","South Korea",None),
+    ("2026-06-25","16:00","E","Ecuador","Germany",None),
+    ("2026-06-25","16:00","E","Curaçao","Ivory Coast",None),
+    ("2026-06-25","19:00","F","Japan","Sweden",None),
+    ("2026-06-25","19:00","F","Tunisia","Netherlands",None),
+    ("2026-06-25","22:00","D","Türkiye","United States",None),
+    ("2026-06-25","22:00","D","Paraguay","Australia",None),
+    ("2026-06-26","15:00","I","Norway","France",None),
+    ("2026-06-26","15:00","I","Senegal","Iraq",None),
+    ("2026-06-26","20:00","H","Cape Verde","Saudi Arabia",None),
+    ("2026-06-26","20:00","H","Uruguay","Spain",None),
+    ("2026-06-26","23:00","G","Egypt","Iran",None),
+    ("2026-06-26","23:00","G","New Zealand","Belgium",None),
+    ("2026-06-27","17:00","L","Panama","England",None),
+    ("2026-06-27","17:00","L","Croatia","Ghana",None),
+    ("2026-06-27","19:30","K","Colombia","Portugal",None),
+    ("2026-06-27","19:30","K","DR Congo","Uzbekistan",None),
+    ("2026-06-27","22:00","J","Algeria","Austria",None),
+    ("2026-06-27","22:00","J","Jordan","Argentina",None),
+]
+
+# Скелет плей-офф (команды определяются по ходу турнира): (раунд, [даты ET])
+_WC_KO_SPEC: list[tuple] = [
+    ("r32", ["2026-06-28","2026-06-28","2026-06-28",
+             "2026-06-29","2026-06-29","2026-06-29",
+             "2026-06-30","2026-06-30","2026-06-30",
+             "2026-07-01","2026-07-01","2026-07-01",
+             "2026-07-02","2026-07-02",
+             "2026-07-03","2026-07-03"]),
+    ("r16", ["2026-07-04","2026-07-04","2026-07-05","2026-07-05",
+             "2026-07-06","2026-07-06","2026-07-07","2026-07-07"]),
+    ("qf",  ["2026-07-09","2026-07-10","2026-07-10","2026-07-11"]),
+    ("sf",  ["2026-07-14","2026-07-15"]),
+    ("3rd", ["2026-07-18"]),
+    ("final", ["2026-07-19"]),
+]
+
+
+def _wc_schedule_2026() -> list[dict]:
+    """Полное реальное расписание ЧМ-2026: 72 матча групп + 32 матча плей-офф."""
+    schedule: list[dict] = []
+    seq = 0
+
+    for date_s, et, grp, home_en, away_en, result in _WC_GROUP_FIXTURES:
+        seq += 1
+        h_ru, h_fl = _WC_TEAMS.get(home_en, (home_en, "🏳"))
+        a_ru, a_fl = _WC_TEAMS.get(away_en, (away_en, "🏳"))
+        hg, ag = (result if result else (None, None))
+        schedule.append({
+            "id": f"M{seq:03d}", "round": "group", "group": grp,
+            "home": h_ru, "home_flag": h_fl,
+            "away": a_ru, "away_flag": a_fl,
+            "kickoff": _wc_et_to_utc_iso(date_s, et),
+            "home_goals": hg, "away_goals": ag,
+        })
+
+    for rnd, dates in _WC_KO_SPEC:
+        for date_s in dates:
+            seq += 1
+            schedule.append({
+                "id": f"M{seq:03d}", "round": rnd, "group": "",
+                "home": "TBD", "home_flag": "🏆",
+                "away": "TBD", "away_flag": "🏆",
+                "kickoff": _wc_et_to_utc_iso(date_s, "19:00"),
+                "home_goals": None, "away_goals": None,
+            })
+
+    return schedule
+
+
+def _wc_fmt_dt(iso: str | None) -> str:
+    """UTC ISO → 'DD.MM HH:MM' по МСК (UTC+3)."""
+    if not iso:
+        return ""
+    from datetime import datetime, timezone, timedelta
+    try:
+        kt = datetime.fromisoformat(iso)
+        if kt.tzinfo is None:
+            kt = kt.replace(tzinfo=timezone.utc)
+        msk = kt.astimezone(timezone(timedelta(hours=3)))
+        return msk.strftime("%d.%m %H:%M")
+    except Exception:
+        return ""
 
 
 def _wc_rank_emoji(rank: int) -> str:
     return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
 
 
-def _wc_match_line(m: dict, pred: dict | None = None) -> str:
+def _wc_live_offset(schedule: list) -> int:
+    """Смещение страницы расписания на первый ещё не сыгранный матч."""
+    for i, m in enumerate(schedule):
+        if m.get("status") != "done":
+            return (i // WC_SCHED_PAGE) * WC_SCHED_PAGE
+    return 0
+
+
+def _wc_match_line(m: dict, pred: dict | None = None, show_date: bool = True) -> str:
     st   = WC_STATUS_EMOJI.get(m.get("status", "upcoming"), "⏳")
     hf   = m.get("home_flag", "")
     af   = m.get("away_flag", "")
@@ -6743,6 +6893,12 @@ def _wc_match_line(m: dict, pred: dict | None = None) -> str:
     away = m.get("away", "?")
     rnd_e = WC_ROUND_EMOJI.get(m.get("round", "group"), "")
     grp  = f"Гр.{m['group']} " if m.get("group") else ""
+
+    dt_str = ""
+    if show_date:
+        d = _wc_fmt_dt(m.get("kickoff"))
+        if d:
+            dt_str = f"_{d}_ "
 
     score_str = ""
     if m.get("status") == "done" and m.get("home_goals") is not None:
@@ -6763,7 +6919,7 @@ def _wc_match_line(m: dict, pred: dict | None = None) -> str:
         else:
             pred_str = f" _[{pred_icon}{exact}]_"
 
-    return f"{st}{rnd_e} {grp}{hf}{home} — {af}{away}{score_str}{pred_str}"
+    return f"{st}{rnd_e} {dt_str}{grp}{hf}{home} — {af}{away}{score_str}{pred_str}"
 
 
 # ── Пользовательские хендлеры ─────────────────────────────────────────────────
@@ -6826,6 +6982,7 @@ async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "🚫 _Счета не повторяются!_"
     )
 
+    live_off = _wc_live_offset(schedule)
     kb = []
     if not my_part:
         fee     = settings.get("entry_fee", 0)
@@ -6834,10 +6991,10 @@ async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if open_matches:
         kb.append([InlineKeyboardButton(
             f"🎯 Сделать прогноз ({len(open_matches)} матч.)",
-            callback_data="fut_wc_schedule_0",
+            callback_data=f"fut_wc_schedule_{live_off}",
         )])
     kb.append([
-        InlineKeyboardButton("📋 Расписание", callback_data="fut_wc_schedule_0"),
+        InlineKeyboardButton("📋 Расписание", callback_data=f"fut_wc_schedule_{live_off}"),
         InlineKeyboardButton("🏆 Таблица",    callback_data="fut_wc_lb_0"),
     ])
     if my_part:
@@ -6919,9 +7076,10 @@ async def cb_fut_wc_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         lines.append(_wc_match_line(m, pred))
 
     text = (
-        f"📋 *РАСПИСАНИЕ ЧМ* ({offset + 1}–{min(offset + WC_SCHED_PAGE, len(schedule))} из {len(schedule)})\n\n"
+        f"📋 *РАСПИСАНИЕ ЧМ-2026* ({offset + 1}–{min(offset + WC_SCHED_PAGE, len(schedule))} из {len(schedule)})\n"
+        f"_время МСК_\n\n"
         + "\n".join(lines)
-        + "\n\n*🟢* = открыт  *⏳* = предстоит  *✅* = сыгран"
+        + "\n\n🟢 открыт · 🔴 закрыт · ⏳ предстоит · ✅ сыгран"
     )
 
     # Кнопки: прогноз для открытых, просмотр прогнозов для закрытых/сыгранных
@@ -7502,9 +7660,11 @@ async def cb_fut_wc_admin_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     hf     = match.get("home_flag", "")
     af     = match.get("away_flag", "")
     status = match.get("status", "upcoming")
-    st_lbl = {"upcoming": "⏳ Предстоит", "open": "🟢 Открыт", "closed": "🔴 Закрыт", "done": "✅ Завершён"}.get(status, status)
+    st_lbl = {"upcoming": "⏳ Предстоит/нет команд", "open": "🟢 Открыт", "closed": "🔴 Закрыт (ждёт результат)", "done": "✅ Завершён"}.get(status, status)
     rnd    = WC_ROUND_LABELS.get(match.get("round", "group"), "")
     grp    = f" • Группа {match['group']}" if match.get("group") else ""
+    dt_str = _wc_fmt_dt(match.get("kickoff"))
+    is_tbd = match.get("home") in ("TBD", "?", "", None)
 
     res_str = ""
     if status == "done":
@@ -7519,17 +7679,19 @@ async def cb_fut_wc_admin_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
     text = (
         f"⚙️ *{mid}: {hf}{match['home']} — {af}{match['away']}*\n"
         f"_{rnd}{grp}_\n"
+        f"🕐 {dt_str} (МСК)\n"
         f"Статус: {st_lbl}{res_str}\n"
         f"Прогнозов: *{n_preds}* (подведено: {n_res})"
     )
 
     kb = []
-    if status == "upcoming":
-        kb.append([InlineKeyboardButton("🟢 Открыть прогнозы", callback_data=f"fut_wc_admin_open_{mid}")])
-    if status == "open":
-        kb.append([InlineKeyboardButton("🔴 Закрыть прогнозы", callback_data=f"fut_wc_admin_close_{mid}")])
-    if status in ("open", "closed", "upcoming"):
-        kb.append([InlineKeyboardButton("📝 Ввести результат", callback_data=f"fut_wc_admin_result_{mid}")])
+    kb.append([InlineKeyboardButton("✏️ Задать команды", callback_data=f"fut_wc_admin_teams_{mid}")])
+    if not is_tbd:
+        kb.append([InlineKeyboardButton("📝 Ввести/исправить результат", callback_data=f"fut_wc_admin_result_{mid}")])
+        if status == "open":
+            kb.append([InlineKeyboardButton("🔴 Закрыть досрочно", callback_data=f"fut_wc_admin_close_{mid}")])
+        elif status == "closed" and match.get("locked"):
+            kb.append([InlineKeyboardButton("🟢 Снять закрытие", callback_data=f"fut_wc_admin_open_{mid}")])
     kb.append([InlineKeyboardButton("◀ К списку", callback_data="fut_wc_admin_list_0")])
 
     await q.edit_message_text(text, parse_mode="Markdown",
@@ -7537,7 +7699,7 @@ async def cb_fut_wc_admin_match(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 
 
 async def cb_fut_wc_admin_open(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """^fut_wc_admin_open_ — открыть прогнозы на матч."""
+    """^fut_wc_admin_open_ — снять ручное закрытие (unlock)."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -7553,47 +7715,13 @@ async def cb_fut_wc_admin_open(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
         await q.answer("Нет активного ЧМ.", show_alert=True)
         return
 
-    ok = db.wc_open_match(wc["id"], mid)
-    await q.answer("✅ Прогнозы открыты!" if ok else "❌ Ошибка", show_alert=True)
-
-    # Уведомить всех участников
-    if ok:
-        wc_fresh = db.get_wc(wc["id"])
-        match    = next((m for m in (wc_fresh.get("schedule") or []) if m["id"] == mid), {})
-        hf       = match.get("home_flag", "")
-        af       = match.get("away_flag", "")
-        home     = match.get("home", "?")
-        away     = match.get("away", "?")
-        parts    = db.wc_get_participants(wc["id"])
-        for p in parts:
-            try:
-                await ctx.bot.send_message(
-                    chat_id=p["user_id"],
-                    text=(
-                        f"🟢 *ПРОГНОЗЫ ОТКРЫТЫ!*\n\n"
-                        f"*{hf} {home}* — *{af} {away}*\n\n"
-                        f"_Сделай прогноз в FUT-меню → 🌍 ЧМ_"
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🎯 Сделать прогноз", callback_data=f"fut_wc_predict_{mid}"),
-                    ]]),
-                )
-            except Exception:
-                pass
-
-    await q.edit_message_text(
-        f"✅ Прогнозы на матч *{mid}* открыты!\n\nУчастники уведомлены.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 К списку матчей", callback_data="fut_wc_admin_list_0")],
-            [InlineKeyboardButton("◀ Управление",       callback_data="fut_wc_admin")],
-        ]),
-    )
+    db.wc_set_lock(wc["id"], mid, False)
+    await q.answer("🟢 Закрытие снято (статус — по времени матча)", show_alert=True)
+    await cb_fut_wc_admin_match(update, ctx)
 
 
 async def cb_fut_wc_admin_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """^fut_wc_admin_close_ — закрыть прогнозы на матч."""
+    """^fut_wc_admin_close_ — закрыть приём прогнозов досрочно (lock)."""
     q   = update.callback_query
     await q.answer()
     uid = q.from_user.id
@@ -7609,15 +7737,45 @@ async def cb_fut_wc_admin_close(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
         await q.answer("Нет активного ЧМ.", show_alert=True)
         return
 
-    ok = db.wc_close_match(wc["id"], mid)
-    await q.answer("🔴 Прогнозы закрыты!" if ok else "❌ Ошибка или уже закрыты", show_alert=True)
+    db.wc_set_lock(wc["id"], mid, True)
+    await q.answer("🔴 Приём прогнозов закрыт", show_alert=True)
+    await cb_fut_wc_admin_match(update, ctx)
+
+
+async def cb_fut_wc_admin_teams(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_admin_teams_ — задать команды для матча (плей-офф)."""
+    q   = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    from config import SUPERADMIN_IDS
+    if uid not in SUPERADMIN_IDS:
+        await q.answer("Нет прав.", show_alert=True)
+        return
+
+    mid = q.data[len("fut_wc_admin_teams_"):]
+    wc  = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    match = next((m for m in (wc.get("schedule") or []) if m["id"] == mid), None)
+    if not match:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+
+    db.set_pending_action(uid, "wc_teams_input", {"wc_id": wc["id"], "match_id": mid})
+    rnd = WC_ROUND_LABELS.get(match.get("round", "group"), "")
     await q.edit_message_text(
-        f"🔴 Прогнозы на матч *{mid}* закрыты.",
+        f"✏️ *Задать команды — {mid}*\n"
+        f"_{rnd}, {_wc_fmt_dt(match.get('kickoff'))} МСК_\n\n"
+        f"Текущие: {match.get('home_flag','')}{match.get('home','?')} — "
+        f"{match.get('away_flag','')}{match.get('away','?')}\n\n"
+        f"Введи команды в формате:\n`Бразилия - Франция`\n\n"
+        f"_(флаги подставятся автоматически по русскому названию)_",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Ввести результат", callback_data=f"fut_wc_admin_result_{mid}")],
-            [InlineKeyboardButton("📋 К списку матчей",  callback_data="fut_wc_admin_list_0")],
-        ]),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data=f"fut_wc_admin_match_{mid}"),
+        ]]),
     )
 
 
@@ -7740,28 +7898,28 @@ async def cb_fut_wc_admin_create(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         return
 
     await q.edit_message_text(
-        "🆕 *СОЗДАТЬ ЧЕМПИОНАТ МИРА*\n\nВыбери формат:",
+        "🆕 *СОЗДАТЬ ЧЕМПИОНАТ МИРА 2026*\n\n"
+        "Будет создан реальный турнир:\n"
+        "• 48 команд, 12 групп (A–L)\n"
+        "• 72 матча группового этапа\n"
+        "• Скелет плей-офф (1/16 → финал)\n"
+        "• Реальный календарь и даты\n"
+        "• Результаты сыгранных матчей уже внесены\n\n"
+        "Прогнозы открываются автоматически до начала каждого матча.\n\n"
+        "Создать?",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "🌍 Мини ЧМ (8 команд, 2 группы)",
-                callback_data="fut_wc_admin_createp_mini",
-            )],
-            [InlineKeyboardButton(
-                "🏆 Стандарт (16 команд, 4 группы)",
-                callback_data="fut_wc_admin_createp_standard",
-            )],
+            [InlineKeyboardButton("🌍 Создать ЧМ-2026", callback_data="fut_wc_admin_createp_2026")],
             [InlineKeyboardButton("◀ Назад", callback_data="fut_wc_admin")],
         ]),
     )
 
 
 async def cb_fut_wc_admin_createp(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """^fut_wc_admin_createp_ — создать ЧМ с выбранным пресетом."""
+    """^fut_wc_admin_createp_ — создать реальный ЧМ-2026."""
     q       = update.callback_query
     await q.answer()
     uid     = q.from_user.id
-    preset  = q.data[len("fut_wc_admin_createp_"):]
 
     from config import SUPERADMIN_IDS
     if uid not in SUPERADMIN_IDS:
@@ -7772,16 +7930,19 @@ async def cb_fut_wc_admin_createp(update: Update, ctx: ContextTypes.DEFAULT_TYPE
         await q.answer("Уже есть активный ЧМ.", show_alert=True)
         return
 
-    schedule = _wc_schedule_mini() if preset == "mini" else _wc_schedule_standard()
-    settings = {"entry_fee": 0, "prizes": WC_PRIZES_DEFAULT}
+    schedule = _wc_schedule_2026()
+    settings = {"entry_fee": 0, "prizes": WC_PRIZES_DEFAULT, "preset": "wc2026"}
     wc_id    = db.create_wc(uid, schedule, settings)
 
-    preset_label = "Мини ЧМ (8 команд)" if preset == "mini" else "Стандарт (16 команд)"
+    n_group = sum(1 for m in schedule if m["round"] == "group")
+    n_done  = sum(1 for m in schedule if m["home_goals"] is not None)
     await q.edit_message_text(
-        f"✅ *{wc_id} создан!*\n\n"
-        f"Формат: _{preset_label}_\n"
-        f"Матчей в группах: *{len(schedule)}*\n\n"
-        f"Открой прогнозы на матчи через «📋 Матчи».",
+        f"✅ *{wc_id} — ЧМ-2026 создан!*\n\n"
+        f"Всего матчей: *{len(schedule)}*\n"
+        f"Групповой этап: *{n_group}*\n"
+        f"Уже сыграно (с результатами): *{n_done}*\n\n"
+        f"Прогнозы открываются автоматически. Команды плей-офф добавишь "
+        f"по ходу через «📋 Матчи» → «✏️ Команды».",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🛠 Управление", callback_data="fut_wc_admin")],
@@ -7972,6 +8133,7 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_wc_admin_open_",           cb_fut_wc_admin_open),
         ("^fut_wc_admin_close_",          cb_fut_wc_admin_close),
         ("^fut_wc_admin_result_",         cb_fut_wc_admin_result),
+        ("^fut_wc_admin_teams_",          cb_fut_wc_admin_teams),
         ("^fut_wc_admin_match_",          cb_fut_wc_admin_match),
         ("^fut_wc_admin_list_",           cb_fut_wc_admin_list),
         ("^fut_wc_admin_finish$",         cb_fut_wc_admin_finish),
