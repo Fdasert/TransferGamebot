@@ -6874,6 +6874,112 @@ def _wc_match_line(m: dict, pred: dict | None = None, show_date: bool = True) ->
     return f"{st}{rnd_e} {dt_str}{grp}{hf}{home} — {af}{away}{score_str}{pred_str}"
 
 
+# ── Справочные данные (стадионы / история) ────────────────────────────────────
+
+# Города-организаторы ЧМ-2026 (16 арен в США, Канаде и Мексике)
+_WC_STADIUMS: list[tuple] = [
+    ("🇲🇽", "Мехико",            "Эстадио Ацтека",        "Матч открытия"),
+    ("🇲🇽", "Гвадалахара",       "Эстадио Акрон",         ""),
+    ("🇲🇽", "Монтеррей",         "Эстадио BBVA",          ""),
+    ("🇨🇦", "Торонто",           "BMO Field",             ""),
+    ("🇨🇦", "Ванкувер",          "BC Place",              ""),
+    ("🇺🇸", "Нью-Йорк / Н.-Дж.", "MetLife Stadium",       "ФИНАЛ"),
+    ("🇺🇸", "Лос-Анджелес",      "SoFi Stadium",          ""),
+    ("🇺🇸", "Даллас",            "AT&T Stadium",          ""),
+    ("🇺🇸", "Сан-Франциско",     "Levi's Stadium",        ""),
+    ("🇺🇸", "Майами",            "Hard Rock Stadium",     ""),
+    ("🇺🇸", "Атланта",           "Mercedes-Benz Stadium", ""),
+    ("🇺🇸", "Сиэтл",             "Lumen Field",           ""),
+    ("🇺🇸", "Хьюстон",           "NRG Stadium",           ""),
+    ("🇺🇸", "Филадельфия",       "Lincoln Financial",     ""),
+    ("🇺🇸", "Канзас-Сити",       "Arrowhead Stadium",     ""),
+    ("🇺🇸", "Бостон",            "Gillette Stadium",      ""),
+]
+
+# Чемпионы прошлых ЧМ (последние турниры + рекордсмены)
+_WC_HISTORY: list[tuple] = [
+    ("2022", "🇶🇦 Катар",        "🇦🇷 Аргентина", "🇫🇷 Франция"),
+    ("2018", "🇷🇺 Россия",       "🇫🇷 Франция",   "🇭🇷 Хорватия"),
+    ("2014", "🇧🇷 Бразилия",     "🇩🇪 Германия",  "🇦🇷 Аргентина"),
+    ("2010", "🇿🇦 ЮАР",          "🇪🇸 Испания",   "🇳🇱 Нидерланды"),
+    ("2006", "🇮🇹 Италия",       "🇮🇹 Италия",    "🇫🇷 Франция"),
+    ("2002", "🇰🇷🇯🇵 Корея/Яп.",  "🇧🇷 Бразилия",  "🇩🇪 Германия"),
+]
+_WC_TITLES: list[str] = [
+    "🇧🇷 Бразилия — 5",
+    "🇩🇪 Германия — 4",
+    "🇮🇹 Италия — 4",
+    "🇦🇷 Аргентина — 3",
+    "🇫🇷 Франция · 🇺🇾 Уругвай — 2",
+]
+
+
+def _wc_group_badge(g: str) -> str:
+    """Буква группы как «плитка» (одиночный regional-indicator: A→🇦 … L→🇱)."""
+    g = (g or "").strip().upper()
+    if len(g) == 1 and "A" <= g <= "Z":
+        return chr(0x1F1E6 + ord(g) - ord("A"))
+    return f"Гр.{g}"
+
+
+def _wc_teams_by_group(schedule: list) -> dict[str, list[tuple]]:
+    """Сборные по группам: {буква: [(имя, флаг), ...]} (уникальные, в порядке появления)."""
+    groups: dict[str, list[tuple]] = {}
+    for m in schedule:
+        g = m.get("group")
+        if not g or m.get("round") != "group":
+            continue
+        bucket = groups.setdefault(g, [])
+        for name, flag in ((m.get("home"), m.get("home_flag", "")),
+                           (m.get("away"), m.get("away_flag", ""))):
+            if name and name not in ("TBD", "?") and (name, flag) not in bucket:
+                bucket.append((name, flag))
+    return dict(sorted(groups.items()))
+
+
+def _wc_group_standings(schedule: list) -> dict[str, list[dict]]:
+    """Турнирная таблица групп из сыгранных матчей. Сортировка: очки → разница → забито."""
+    table: dict[str, dict[str, dict]] = {}
+
+    # Заводим все команды (даже без игр), чтобы группа всегда была полной
+    for g, teams in _wc_teams_by_group(schedule).items():
+        table[g] = {
+            name: {"team": name, "flag": flag, "P": 0, "W": 0, "D": 0,
+                   "L": 0, "GF": 0, "GA": 0, "Pts": 0}
+            for name, flag in teams
+        }
+
+    for m in schedule:
+        g = m.get("group")
+        if (not g or m.get("round") != "group"
+                or m.get("home_goals") is None or m.get("away_goals") is None):
+            continue
+        hg, ag = m["home_goals"], m["away_goals"]
+        h, a   = m.get("home"), m.get("away")
+        if h not in table.get(g, {}) or a not in table.get(g, {}):
+            continue
+        rh, ra = table[g][h], table[g][a]
+        rh["P"] += 1; ra["P"] += 1
+        rh["GF"] += hg; rh["GA"] += ag
+        ra["GF"] += ag; ra["GA"] += hg
+        if hg > ag:
+            rh["W"] += 1; rh["Pts"] += 3; ra["L"] += 1
+        elif hg < ag:
+            ra["W"] += 1; ra["Pts"] += 3; rh["L"] += 1
+        else:
+            rh["D"] += 1; ra["D"] += 1; rh["Pts"] += 1; ra["Pts"] += 1
+
+    out: dict[str, list[dict]] = {}
+    for g, rows in table.items():
+        ranked = sorted(
+            rows.values(),
+            key=lambda r: (r["Pts"], r["GF"] - r["GA"], r["GF"]),
+            reverse=True,
+        )
+        out[g] = ranked
+    return out
+
+
 # ── Пользовательские хендлеры ─────────────────────────────────────────────────
 
 async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6924,31 +7030,58 @@ async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         my_line = "\n\n_Ты ещё не записан — нажми «Участвовать»!_"
 
+    # «Следующий матч» — ближайший открытый по времени
+    next_line = ""
+    if open_matches:
+        nm = open_matches[0]
+        next_line = (
+            f"\n⏭ _Ближайший:_ {nm.get('home_flag','')}{nm.get('home','?')} — "
+            f"{nm.get('away_flag','')}{nm.get('away','?')}  ·  {_wc_fmt_dt(nm.get('kickoff'))}"
+        )
+
     text = (
-        f"🌍 *{wc_id} — ЧЕМПИОНАТ МИРА*\n\n"
-        f"👥 Участников: *{len(parts)}*   "
-        f"📊 Матчей: *{len(done_matches)}/{len(schedule)}*\n"
-        f"🟢 Открыто для прогнозов: *{len(open_matches)}*\n\n"
-        f"🏆 *Топ-3:*\n{top3}"
+        "🏆 *FIFA WORLD CUP 2026* 🌍\n"
+        "🇺🇸 🇨🇦 🇲🇽  _США · Канада · Мексика_\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Сыграно: *{len(done_matches)}/{len(schedule)}*   "
+        f"🟢 Открыто: *{len(open_matches)}*\n"
+        f"👥 Прогнозистов: *{len(parts)}*"
+        f"{next_line}\n\n"
+        f"🏆 *Лидеры прогнозов:*\n{top3}"
         f"{my_line}\n\n"
-        "📜 _Регламент: точный счёт — 5 • исход — 3 • разница — +1_\n"
-        "🚫 _Счета не повторяются!_"
+        "📜 _Очки: точный счёт 5 · исход 3 · разница +1_\n"
+        "🚫 _Счёт не должен повторяться у разных игроков_"
     )
 
     live_off = _wc_live_offset(schedule)
     kb = []
+    # Действие-прогноз (или вступление)
     if not my_part:
         fee     = settings.get("entry_fee", 0)
-        fee_str = f" ({_fmt(fee)} 💰)" if fee else " (бесплатно)"
-        kb.append([InlineKeyboardButton(f"✅ Участвовать{fee_str}", callback_data="fut_wc_join")])
-    if open_matches:
+        fee_str = f" ({_fmt(fee)} 💰)" if fee else " (free)"
+        kb.append([InlineKeyboardButton(f"✅ Участвовать в прогнозах{fee_str}",
+                                        callback_data="fut_wc_join")])
+    elif open_matches:
         kb.append([InlineKeyboardButton(
-            f"🎯 Сделать прогноз ({len(open_matches)} матч.)",
+            f"🎯 Сделать прогноз ({len(open_matches)})",
             callback_data=f"fut_wc_schedule_{live_off}",
         )])
+    # Вкладки в стиле soccer365
     kb.append([
-        InlineKeyboardButton("📋 Расписание", callback_data=f"fut_wc_schedule_{live_off}"),
-        InlineKeyboardButton("🏆 Таблица",    callback_data="fut_wc_lb_0"),
+        InlineKeyboardButton("📊 Таблица",    callback_data="fut_wc_tbl"),
+        InlineKeyboardButton("📅 Расписание", callback_data=f"fut_wc_schedule_{live_off}"),
+    ])
+    kb.append([
+        InlineKeyboardButton("✅ Результаты", callback_data="fut_wc_res_0"),
+        InlineKeyboardButton("🏳 Команды",    callback_data="fut_wc_teams"),
+    ])
+    kb.append([
+        InlineKeyboardButton("🎯 Прогнозы",  callback_data=f"fut_wc_schedule_{live_off}"),
+        InlineKeyboardButton("👑 Рейтинг",   callback_data="fut_wc_lb_0"),
+    ])
+    kb.append([
+        InlineKeyboardButton("🏟 Стадионы",  callback_data="fut_wc_stad"),
+        InlineKeyboardButton("📜 История",   callback_data="fut_wc_hist"),
     ])
     if my_part:
         kb.append([InlineKeyboardButton("📝 Мои прогнозы", callback_data="fut_wc_mypreds_0")])
@@ -7003,6 +7136,156 @@ async def cb_fut_wc_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     await q.answer("✅ Ты теперь участник ЧМ!")
     await cb_fut_wc(update, ctx)
+
+
+async def cb_fut_wc_table(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_tbl$ — турнирная таблица групп (вкладка «Таблица»)."""
+    q  = update.callback_query
+    await q.answer()
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    schedule  = wc.get("schedule") or []
+    standings = _wc_group_standings(schedule)
+
+    blocks = ["📊 *ТАБЛИЦА ГРУПП — ЧМ-2026*\n_И · О · мячи · ±_\n"]
+    for g, rows in standings.items():
+        lines = [f"{_wc_group_badge(g)} *Группа {g}*"]
+        for i, r in enumerate(rows, 1):
+            gd  = r["GF"] - r["GA"]
+            gds = f"+{gd}" if gd > 0 else str(gd)
+            mark = "🟢" if i <= 2 else ("🟡" if i == 3 else "⚪")
+            nm  = (r["team"][:11])
+            lines.append(
+                f"{mark}{i} {r['flag']}{nm}  "
+                f"`{r['P']:>1} {r['Pts']:>2}о {r['GF']}:{r['GA']} {gds}`"
+            )
+        blocks.append("\n".join(lines))
+
+    text = "\n\n".join(blocks) + "\n\n🟢 плей-офф · 🟡 стыки/лучшие 3-и · ⚪ вылет"
+    await q.edit_message_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_results(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_res_ — сыгранные матчи с результатами (вкладка «Результаты»)."""
+    q      = update.callback_query
+    await q.answer()
+    offset = int(q.data.split("_")[-1])
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    schedule = wc.get("schedule") or []
+    done = [m for m in schedule if m.get("status") == "done"]
+    done.sort(key=lambda m: m.get("kickoff") or "")
+
+    if not done:
+        await q.edit_message_text(
+            "✅ *РЕЗУЛЬТАТЫ — ЧМ-2026*\n\n_Сыгранных матчей пока нет._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
+            ]]),
+        )
+        return
+
+    page  = done[offset: offset + WC_SCHED_PAGE]
+    lines = [_wc_match_line(m, show_date=True) for m in page]
+    text  = (
+        f"✅ *РЕЗУЛЬТАТЫ — ЧМ-2026* ({offset + 1}–{min(offset + WC_SCHED_PAGE, len(done))} из {len(done)})\n"
+        "_местное время матча (ET)_\n\n"
+        + "\n".join(lines)
+    )
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀ Пред", callback_data=f"fut_wc_res_{offset - WC_SCHED_PAGE}"))
+    if offset + WC_SCHED_PAGE < len(done):
+        nav.append(InlineKeyboardButton("След ▶", callback_data=f"fut_wc_res_{offset + WC_SCHED_PAGE}"))
+    kb = [nav] if nav else []
+    kb.append([InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc")])
+
+    await q.edit_message_text(text, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def cb_fut_wc_teams(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_teams$ — сборные по группам (вкладка «Команды»)."""
+    q  = update.callback_query
+    await q.answer()
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    schedule = wc.get("schedule") or []
+    groups   = _wc_teams_by_group(schedule)
+
+    total = sum(len(v) for v in groups.values())
+    blocks = [f"🏳 *СБОРНЫЕ — ЧМ-2026*\n_{total} команд · {len(groups)} групп_\n"]
+    for g, teams in groups.items():
+        names = "  ".join(f"{fl}{nm}" for nm, fl in teams)
+        blocks.append(f"{_wc_group_badge(g)} *Группа {g}*\n{names}")
+
+    await q.edit_message_text(
+        "\n\n".join(blocks),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_stadiums(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_stad$ — города и арены (вкладка «Стадионы»)."""
+    q = update.callback_query
+    await q.answer()
+
+    lines = ["🏟 *СТАДИОНЫ ЧМ-2026*\n_16 арен · 3 страны_\n"]
+    for flag, city, arena, note in _WC_STADIUMS:
+        tag = f"  ⭐ _{note}_" if note else ""
+        lines.append(f"{flag} *{city}* — {arena}{tag}")
+
+    await q.edit_message_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_hist$ — чемпионы прошлых турниров (вкладка «История»)."""
+    q = update.callback_query
+    await q.answer()
+
+    champ = "\n".join(
+        f"*{yr}* {host} → 🥇 {win}  _(финал vs {ru})_"
+        for yr, host, win, ru in _WC_HISTORY
+    )
+    titles = "\n".join(f"• {t}" for t in _WC_TITLES)
+    text = (
+        "📜 *ИСТОРИЯ ЧЕМПИОНАТА МИРА*\n\n"
+        "🏆 *Последние чемпионы:*\n"
+        f"{champ}\n\n"
+        "👑 *Больше всего титулов:*\n"
+        f"{titles}"
+    )
+    await q.edit_message_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
+        ]]),
+    )
 
 
 async def cb_fut_wc_schedule(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7961,6 +8244,12 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_wc_psave_",                cb_fut_wc_pred_save),        # до fut_wc_pw_
         ("^fut_wc_pw_",                   cb_fut_wc_pred_winner),
         ("^fut_wc_predict_",              cb_fut_wc_predict),
+        # ── Вкладки-разделы (soccer365-style) ──
+        ("^fut_wc_tbl$",                  cb_fut_wc_table),
+        ("^fut_wc_res_",                  cb_fut_wc_results),
+        ("^fut_wc_teams$",                cb_fut_wc_teams),
+        ("^fut_wc_stad$",                 cb_fut_wc_stadiums),
+        ("^fut_wc_hist$",                 cb_fut_wc_history),
         ("^fut_wc_schedule_",             cb_fut_wc_schedule),
         ("^fut_wc_lb_",                   cb_fut_wc_leaderboard),
         ("^fut_wc_mypreds_",              cb_fut_wc_mypreds),
