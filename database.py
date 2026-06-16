@@ -1387,3 +1387,309 @@ def wc_add_match(wc_id: str, match: dict) -> bool:
     schedule.append(match)
     update_wc(wc_id, schedule=schedule)
     return True
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  КРОСС-БОТ ТОТАЛИЗАТОР НА МАТЧИ ЧМ (общая БД с кубассами)
+#  Ставки из FUT-бота (FUT-монеты) и из кубассов (CUB-монеты) в один пул.
+#  Пул считается в FUT-эквиваленте (1 CUB = CROSS_RATE FUT). Pari-mutuel, рейк 10%.
+# ══════════════════════════════════════════════════════════════════════════════
+
+WC_BET_RAKE     = 0.10
+WC_BET_MIN_FUT  = 100
+WC_BET_MAX_FUT  = 200_000
+
+# Рынки: ключ → (название, [(код выбора, подпись), ...])
+WC_MARKETS: dict[str, tuple] = {
+    "1x2":      ("Исход",            [("P1", "П1"), ("X", "Ничья"), ("P2", "П2")]),
+    "dc":       ("Двойной шанс",     [("1X", "1X"), ("12", "12"), ("X2", "X2")]),
+    "total25":  ("Тотал 2.5",        [("O", "Больше 2.5"), ("U", "Меньше 2.5")]),
+    "btts":     ("Обе забьют",       [("Y", "Да"), ("N", "Нет")]),
+    "itot_h15": ("Инд. тотал П1 1.5",[("O", "Больше 1.5"), ("U", "Меньше 1.5")]),
+    "itot_a15": ("Инд. тотал П2 1.5",[("O", "Больше 1.5"), ("U", "Меньше 1.5")]),
+}
+
+
+def wc_bet_wins(market: str, selection: str, hg: int, ag: int) -> bool:
+    """Сыграла ли ставка при счёте hg:ag."""
+    tot = hg + ag
+    if market == "1x2":
+        return ((selection == "P1" and hg > ag) or (selection == "X" and hg == ag)
+                or (selection == "P2" and hg < ag))
+    if market == "dc":
+        return ((selection == "1X" and hg >= ag) or (selection == "12" and hg != ag)
+                or (selection == "X2" and hg <= ag))
+    if market == "total25":
+        return (selection == "O" and tot >= 3) or (selection == "U" and tot <= 2)
+    if market == "btts":
+        yes = hg > 0 and ag > 0
+        return (selection == "Y" and yes) or (selection == "N" and not yes)
+    if market == "itot_h15":
+        return (selection == "O" and hg >= 2) or (selection == "U" and hg <= 1)
+    if market == "itot_a15":
+        return (selection == "O" and ag >= 2) or (selection == "U" and ag <= 1)
+    return False
+
+
+# ── Доступ к CUB-монетам в кубассовой БД (RLS отключён) ────────────────────────
+
+def cube_get_coins(uid: int) -> int | None:
+    cc = get_cube_client()
+    if not cc:
+        return None
+    r = cc.table("users").select("coins").eq("user_id", uid).execute()
+    return int(r.data[0]["coins"]) if r.data else None
+
+
+def cube_add_coins(uid: int, amount: int) -> bool:
+    cc = get_cube_client()
+    if not cc:
+        return False
+    cur = cube_get_coins(uid)
+    if cur is None:
+        return False
+    cc.table("users").update({"coins": cur + int(amount)}).eq("user_id", uid).execute()
+    return True
+
+
+def cube_spend_coins(uid: int, amount: int) -> tuple[bool, int]:
+    cc = get_cube_client()
+    if not cc:
+        return False, 0
+    cur = cube_get_coins(uid)
+    if cur is None:
+        return False, 0
+    if cur < amount:
+        return False, cur
+    cc.table("users").update({"coins": cur - int(amount)}).eq("user_id", uid).execute()
+    return True, cur - int(amount)
+
+
+# ── Публикация матчей и пулов ──────────────────────────────────────────────────
+
+def wc_publish_open_matches(schedule: list) -> None:
+    """Синхронизирует список матчей, открытых для ставок, в кубассову БД (лениво)."""
+    cc = get_cube_client()
+    if not cc:
+        return
+    import datetime as _dt
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    rows = []
+    for m in schedule:
+        st = m.get("status")
+        if st not in ("open", "done"):
+            continue
+        if m.get("home") in (None, "TBD", "?"):
+            continue
+        rows.append({
+            "match_id":  m["id"],
+            "home":      m.get("home", ""),  "away":      m.get("away", ""),
+            "home_flag": m.get("home_flag", ""), "away_flag": m.get("away_flag", ""),
+            "round":     m.get("round", "group"), "grp": m.get("group", ""),
+            "kickoff":   m.get("kickoff"),
+            "status":    "open" if st == "open" else "settled",
+            "home_goals": m.get("home_goals"), "away_goals": m.get("away_goals"),
+            "updated_at": now_iso,
+        })
+    if rows:
+        try:
+            cc.table("wc_bet_matches").upsert(rows, on_conflict="match_id").execute()
+        except Exception as e:
+            logger.warning("wc_publish_open_matches failed: %s", e)
+
+
+def wc_bet_pools(match_id: str) -> dict:
+    """{market: {selection: pool_fe}} по непогашенным ставкам матча."""
+    cc = get_cube_client()
+    if not cc:
+        return {}
+    r = (cc.table("wc_bets").select("market, selection, stake_fe")
+         .eq("match_id", match_id).eq("status", "pending").execute())
+    pools: dict[str, dict[str, int]] = {}
+    for b in (r.data or []):
+        pools.setdefault(b["market"], {}).setdefault(b["selection"], 0)
+        pools[b["market"]][b["selection"]] += int(b["stake_fe"])
+    return pools
+
+
+def wc_market_odds(pools: dict, market: str, selection: str) -> float:
+    """Ориентировочный pari-mutuel коэффициент (после рейка)."""
+    mp = pools.get(market, {})
+    own = mp.get(selection, 0)
+    total = sum(mp.values())
+    if own <= 0 or total <= 0:
+        return 0.0  # 0 → «—» в UI (ещё нет ставок на исход)
+    return max(1.01, round((1 - WC_BET_RAKE) * total / own, 2))
+
+
+def wc_user_has_bet(match_id: str, market: str, uid: int, bot: str) -> bool:
+    cc = get_cube_client()
+    if not cc:
+        return False
+    r = (cc.table("wc_bets").select("id")
+         .eq("match_id", match_id).eq("market", market)
+         .eq("bettor_uid", uid).eq("bettor_bot", bot)
+         .eq("status", "pending").limit(1).execute())
+    return bool(r.data)
+
+
+def _wc_place_bet(uid: int, bot: str, match_id: str, market: str, selection: str,
+                  stake: int, stake_fe: int) -> tuple[bool, str]:
+    """Регистрирует ставку (монеты уже списаны вызывающим). (ok, err)."""
+    cc = get_cube_client()
+    if not cc:
+        return False, "Тотализатор временно недоступен."
+    # матч должен быть открыт
+    mr = cc.table("wc_bet_matches").select("status").eq("match_id", match_id).execute()
+    if not mr.data or mr.data[0]["status"] != "open":
+        return False, "Приём ставок на этот матч закрыт."
+    if wc_user_has_bet(match_id, market, uid, bot):
+        return False, "Ты уже сделал ставку на этот рынок."
+    try:
+        cc.table("wc_bets").insert({
+            "match_id": match_id, "market": market, "selection": selection,
+            "bettor_uid": uid, "bettor_bot": bot,
+            "stake": int(stake), "stake_fe": int(stake_fe), "status": "pending",
+        }).execute()
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def place_wc_bet_fut(uid: int, match_id: str, market: str, selection: str,
+                     stake: int) -> tuple[bool, str]:
+    """Ставка из FUT-бота в FUT-монетах."""
+    if market not in WC_MARKETS:
+        return False, "Неизвестный рынок."
+    if stake < WC_BET_MIN_FUT or stake > WC_BET_MAX_FUT:
+        return False, f"Ставка от {WC_BET_MIN_FUT} до {WC_BET_MAX_FUT} FUT."
+    # резервируем, проверив доступность рынка ДО списания
+    cc = get_cube_client()
+    if not cc:
+        return False, "Тотализатор временно недоступен."
+    mr = cc.table("wc_bet_matches").select("status").eq("match_id", match_id).execute()
+    if not mr.data or mr.data[0]["status"] != "open":
+        return False, "Приём ставок на этот матч закрыт."
+    if wc_user_has_bet(match_id, market, uid, "fut"):
+        return False, "Ты уже сделал ставку на этот рынок."
+    ok, _ = spend_coins(uid, stake)
+    if not ok:
+        return False, "Недостаточно FUT-монет."
+    ok2, err = _wc_place_bet(uid, "fut", match_id, market, selection, stake, stake)
+    if not ok2:
+        add_coins(uid, stake)  # возврат при гонке
+        return False, err
+    return True, ""
+
+
+def settle_wc_match(match_id: str, hg: int, ag: int) -> dict:
+    """Рассчитывает все ставки матча. Кредитует победителей в их валюте.
+    Возвращает {fut_notifs: [(uid, msg)], cube_count, total_bets, pool_fe}."""
+    cc = get_cube_client()
+    out = {"fut_notifs": [], "cube_count": 0, "total_bets": 0, "pool_fe": 0}
+    if not cc:
+        return out
+    r = cc.table("wc_bets").select("*").eq("match_id", match_id).eq("status", "pending").execute()
+    bets = r.data or []
+    out["total_bets"] = len(bets)
+    if not bets:
+        cc.table("wc_bet_matches").update(
+            {"status": "settled", "home_goals": hg, "away_goals": ag}
+        ).eq("match_id", match_id).execute()
+        return out
+
+    import datetime as _dt
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+    # группируем по рынку
+    by_market: dict[str, list] = {}
+    for b in bets:
+        by_market.setdefault(b["market"], []).append(b)
+
+    def _sel_label(market, sel):
+        for code, lbl in WC_MARKETS.get(market, ("", []))[1]:
+            if code == sel:
+                return lbl
+        return sel
+
+    for market, mbets in by_market.items():
+        total = sum(int(b["stake_fe"]) for b in mbets)
+        out["pool_fe"] += total
+        winners = [b for b in mbets if wc_bet_wins(market, b["selection"], hg, ag)]
+        win_pool = sum(int(b["stake_fe"]) for b in winners)
+        mname = WC_MARKETS.get(market, (market, []))[0]
+        for b in mbets:
+            uid, bot = int(b["bettor_uid"]), b["bettor_bot"]
+            stake_fe = int(b["stake_fe"])
+            stake    = int(b["stake"])
+            is_win   = b in winners
+            if win_pool == 0:
+                status, payout_fe = "void", stake_fe          # никто не угадал → возврат
+            elif is_win:
+                status, payout_fe = "won", int(stake_fe / win_pool * total * (1 - WC_BET_RAKE))
+            else:
+                status, payout_fe = "lost", 0
+            # конвертация в валюту игрока
+            if bot == "fut":
+                payout = payout_fe
+            else:
+                payout = int(round(payout_fe / CROSS_RATE))
+            # кредитуем
+            if payout > 0:
+                if bot == "fut":
+                    add_coins(uid, payout)
+                else:
+                    cube_add_coins(uid, payout)
+            cc.table("wc_bets").update({
+                "status": status, "payout": payout, "resolved_at": now_iso,
+            }).eq("id", b["id"]).execute()
+            # уведомление
+            cur = "FUT" if bot == "fut" else "CUB"
+            if status == "won":
+                msg = (f"🎉 Ставка сыграла! {mname} «{_sel_label(market, b['selection'])}» "
+                       f"при счёте {hg}:{ag}\nВыигрыш: +{payout:,} {cur}".replace(",", " "))
+            elif status == "void":
+                msg = (f"↩️ Ставка возвращена ({mname}) — никто не угадал. "
+                       f"Возврат: {payout:,} {cur}".replace(",", " "))
+            else:
+                msg = (f"❌ Ставка не сыграла: {mname} «{_sel_label(market, b['selection'])}» "
+                       f"при счёте {hg}:{ag} (−{stake:,} {cur})".replace(",", " "))
+            if bot == "fut":
+                out["fut_notifs"].append((uid, msg))
+            else:
+                out["cube_count"] += 1
+                try:
+                    cc.table("wc_bet_notify").insert(
+                        {"uid": uid, "bot": "cube", "message": msg}).execute()
+                except Exception:
+                    pass
+
+    cc.table("wc_bet_matches").update(
+        {"status": "settled", "home_goals": hg, "away_goals": ag}
+    ).eq("match_id", match_id).execute()
+    return out
+
+
+def wc_user_bets(uid: int, bot: str, limit: int = 20) -> list[dict]:
+    cc = get_cube_client()
+    if not cc:
+        return []
+    r = (cc.table("wc_bets").select("*")
+         .eq("bettor_uid", uid).eq("bettor_bot", bot)
+         .order("created_at", desc=True).limit(limit).execute())
+    return r.data or []
+
+
+def wc_take_notifications(uid: int, bot: str) -> list[str]:
+    """Забирает недоставленные уведомления о ставках (для ленивой выдачи)."""
+    cc = get_cube_client()
+    if not cc:
+        return []
+    r = (cc.table("wc_bet_notify").select("id, message")
+         .eq("uid", uid).eq("bot", bot).eq("delivered", False)
+         .order("created_at").execute())
+    rows = r.data or []
+    if rows:
+        ids = [x["id"] for x in rows]
+        cc.table("wc_bet_notify").update({"delivered": True}).in_("id", ids).execute()
+    return [x["message"] for x in rows]

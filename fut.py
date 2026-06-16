@@ -4317,6 +4317,58 @@ async def handle_fut_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> boo
                     )
                 except Exception:
                     pass
+
+        # ── Рассчитать тотализатор (ставки FUT+CUB) и разослать пуши ──────────
+        try:
+            bet_res = db.settle_wc_match(match_id, h_goals, a_goals)
+            notifs  = bet_res.get("fut_notifs", [])
+            if notifs:
+                async def _push_bet_results(items):
+                    for buid, bmsg in items:
+                        try:
+                            await ctx.bot.send_message(chat_id=buid, text=bmsg)
+                        except Exception:
+                            pass
+                asyncio.create_task(_push_bet_results(list(notifs)))
+            if bet_res.get("total_bets"):
+                await update.message.reply_text(
+                    f"💸 Ставок рассчитано: *{bet_res['total_bets']}* "
+                    f"(FUT-пуши: {len(notifs)} · кубассы: {bet_res.get('cube_count', 0)})",
+                    parse_mode="Markdown",
+                )
+        except Exception as e:
+            logger.warning("settle_wc_match failed: %s", e)
+        return True
+
+    # ── ЧМ: своя сумма ставки текстом ─────────────────────────────────────────
+    if action == "wc_bet_stake_input":
+        data = pending.get("data", {})
+        mid  = data.get("match_id")
+        mcb  = data.get("mcb")
+        sel  = data.get("selection")
+        market = WC_BET_CB_REV.get(mcb)
+        import re
+        m_amt = re.match(r"^\s*(\d[\d\s]*)\s*$", text)
+        if not m_amt or not market:
+            await update.message.reply_text("❌ Введи сумму числом, например `5000`.",
+                                            parse_mode="Markdown")
+            return True
+        amt = int(m_amt.group(1).replace(" ", ""))
+        db.clear_pending_action(uid)
+        ok, err = db.place_wc_bet_fut(uid, mid, market, sel, amt)
+        if not ok:
+            await update.message.reply_text(f"❌ {err}")
+            return True
+        mname, sels = db.WC_MARKETS[market]
+        sel_lbl = next((l for c, l in sels if c == sel), sel)
+        await update.message.reply_text(
+            f"✅ *Ставка принята!*\n{mname}: *{sel_lbl}* — *{amt:,} FUT*".replace(",", " "),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧾 Мои ставки", callback_data="fut_wc_mybets")],
+                [InlineKeyboardButton("💸 Ещё ставка", callback_data="fut_wc_bets_0")],
+            ]),
+        )
         return True
 
     # ── ЧМ: свой счёт прогноза текстом ────────────────────────────────────────
@@ -6672,6 +6724,12 @@ _TEAM_FLAGS.update({
 WC_SCHED_PAGE = 6   # матчей на страницу расписания
 WC_LB_PAGE    = 10  # участников на страницу таблицы
 
+# Тотализатор: коды рынков без подчёркиваний (безопасно для callback_data)
+WC_BET_CB     = {"1x2": "1x2", "dc": "dc", "total25": "tot",
+                 "btts": "btts", "itot_h15": "ith", "itot_a15": "ita"}
+WC_BET_CB_REV = {v: k for k, v in WC_BET_CB.items()}
+WC_BET_STAKES = [500, 1_000, 5_000, 25_000]   # пресеты ставок (FUT)
+
 
 def _team_flag(name: str) -> str:
     return _TEAM_FLAGS.get(name.lower().strip(), "🏳")
@@ -7080,6 +7138,10 @@ async def cb_fut_wc(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         InlineKeyboardButton("👑 Рейтинг",   callback_data="fut_wc_lb_0"),
     ])
     kb.append([
+        InlineKeyboardButton("💸 Ставки",    callback_data="fut_wc_bets_0"),
+        InlineKeyboardButton("🧾 Мои ставки", callback_data="fut_wc_mybets"),
+    ])
+    kb.append([
         InlineKeyboardButton("🏟 Стадионы",  callback_data="fut_wc_stad"),
         InlineKeyboardButton("📜 История",   callback_data="fut_wc_hist"),
     ])
@@ -7285,6 +7347,290 @@ async def cb_fut_wc_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
         ]]),
+    )
+
+
+# ── Тотализатор (кросс-бот ставки) ────────────────────────────────────────────
+
+def _wc_find_match(mid: str):
+    wc = db.get_active_wc()
+    if not wc:
+        return None, None
+    m = next((x for x in (wc.get("schedule") or []) if x["id"] == mid), None)
+    return wc, m
+
+
+async def cb_fut_wc_bets(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_bets_ — список открытых для ставок матчей."""
+    q      = update.callback_query
+    await q.answer()
+    offset = int(q.data.split("_")[-1])
+
+    wc = db.get_active_wc()
+    if not wc:
+        await q.answer("Нет активного ЧМ.", show_alert=True)
+        return
+    schedule = wc.get("schedule") or []
+    # публикуем открытые матчи в общую БД (чтобы кубассовцы тоже видели)
+    try:
+        db.wc_publish_open_matches(schedule)
+    except Exception as e:
+        logger.warning("publish open matches failed: %s", e)
+
+    open_m = [m for m in schedule if m.get("status") == "open"
+              and m.get("home") not in (None, "TBD", "?")]
+    open_m.sort(key=lambda m: m.get("kickoff") or "")
+
+    if not open_m:
+        await q.edit_message_text(
+            "💸 *ТОТАЛИЗАТОР ЧМ-2026*\n\n_Сейчас нет матчей, открытых для ставок._\n"
+            "Загляни ближе к началу следующего тура.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc"),
+            ]]),
+        )
+        return
+
+    page = open_m[offset: offset + WC_SCHED_PAGE]
+    kb   = []
+    for m in page:
+        pools = db.wc_bet_pools(m["id"])
+        o1 = db.wc_market_odds(pools, "1x2", "P1")
+        ox = db.wc_market_odds(pools, "1x2", "X")
+        o2 = db.wc_market_odds(pools, "1x2", "P2")
+        def _f(o): return f"{o:.2f}" if o else "—"
+        label = (f"{m.get('home_flag','')}{m['home'][:9]}–{m.get('away_flag','')}{m['away'][:9]}  "
+                 f"│ {_f(o1)}/{_f(ox)}/{_f(o2)}")
+        kb.append([InlineKeyboardButton(label, callback_data=f"fut_wc_bm_{m['id']}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀", callback_data=f"fut_wc_bets_{offset - WC_SCHED_PAGE}"))
+    if offset + WC_SCHED_PAGE < len(open_m):
+        nav.append(InlineKeyboardButton("▶", callback_data=f"fut_wc_bets_{offset + WC_SCHED_PAGE}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("🧾 Мои ставки", callback_data="fut_wc_mybets")])
+    kb.append([InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc")])
+
+    await q.edit_message_text(
+        f"💸 *ТОТАЛИЗАТОР ЧМ-2026*\n"
+        f"_Коэфф. П1/Х/П2 · пул общий с кубассами_\n"
+        f"Открыто матчей: *{len(open_m)}*\n\n"
+        f"Выбери матч 👇",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_wc_betmatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_bm_ — рынки одного матча."""
+    q   = update.callback_query
+    await q.answer()
+    mid = q.data[len("fut_wc_bm_"):]
+    wc, m = _wc_find_match(mid)
+    if not m:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+    if m.get("status") != "open":
+        await q.answer("Приём ставок закрыт.", show_alert=True)
+        return await cb_fut_wc_bets(update, ctx)
+
+    pools = db.wc_bet_pools(mid)
+    total_fe = sum(sum(s.values()) for s in pools.values())
+
+    kb = []
+    for mkey, (mname, _sels) in db.WC_MARKETS.items():
+        kb.append([InlineKeyboardButton(
+            mname, callback_data=f"fut_wc_mk_{mid}_{WC_BET_CB[mkey]}")])
+    kb.append([InlineKeyboardButton("◀ К матчам", callback_data="fut_wc_bets_0")])
+
+    await q.edit_message_text(
+        f"💸 *{m.get('home_flag','')}{m['home']} — {m.get('away_flag','')}{m['away']}*\n"
+        f"🕐 {_wc_fmt_dt(m.get('kickoff'))} ET\n"
+        f"🏦 В пуле: *{total_fe:,}* FUT-экв.\n\n".replace(",", " ")
+        + "Выбери рынок:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_wc_betmarket(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_mk_ — выбор исхода в рынке (с коэффициентами)."""
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    mid, mcb = parts[3], parts[4]
+    market = WC_BET_CB_REV.get(mcb)
+    wc, m = _wc_find_match(mid)
+    if not m or not market:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+    if m.get("status") != "open":
+        await q.answer("Приём ставок закрыт.", show_alert=True)
+        return await cb_fut_wc_bets(update, ctx)
+
+    mname, sels = db.WC_MARKETS[market]
+    pools = db.wc_bet_pools(mid)
+    already = db.wc_user_has_bet(mid, market, q.from_user.id, "fut")
+
+    kb = []
+    for code, lbl in sels:
+        o = db.wc_market_odds(pools, market, code)
+        ostr = f"{o:.2f}" if o else "—"
+        kb.append([InlineKeyboardButton(
+            f"{lbl}  ·  {ostr}", callback_data=f"fut_wc_sel_{mid}_{mcb}_{code}")])
+    kb.append([InlineKeyboardButton("◀ Рынки", callback_data=f"fut_wc_bm_{mid}")])
+
+    note = "\n\n⚠️ _Ты уже ставил на этот рынок._" if already else ""
+    await q.edit_message_text(
+        f"💸 *{m['home']} — {m['away']}*\n"
+        f"Рынок: *{mname}*\n"
+        f"_Коэффициенты pari-mutuel (ориентир, итог зависит от пула)_{note}\n\n"
+        "Выбери исход:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_fut_wc_betselect(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_sel_ — выбран исход, выбор суммы ставки."""
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    mid, mcb, sel = parts[3], parts[4], parts[5]
+    market = WC_BET_CB_REV.get(mcb)
+    wc, m = _wc_find_match(mid)
+    if not m or not market:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+
+    mname, sels = db.WC_MARKETS[market]
+    sel_lbl = next((l for c, l in sels if c == sel), sel)
+    pools   = db.wc_bet_pools(mid)
+    o       = db.wc_market_odds(pools, market, sel)
+    ostr    = f"{o:.2f}" if o else "—"
+
+    kb = []
+    row = []
+    for amt in WC_BET_STAKES:
+        row.append(InlineKeyboardButton(
+            f"{amt:,}".replace(",", " "),
+            callback_data=f"fut_wc_stk_{mid}_{mcb}_{sel}_{amt}"))
+        if len(row) == 2:
+            kb.append(row); row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton("✏️ Своя сумма",
+                                    callback_data=f"fut_wc_bcust_{mid}_{mcb}_{sel}")])
+    kb.append([InlineKeyboardButton("◀ Назад", callback_data=f"fut_wc_mk_{mid}_{mcb}")])
+
+    await q.edit_message_text(
+        f"💸 *{m['home']} — {m['away']}*\n"
+        f"{mname}: *{sel_lbl}*  ·  коэфф. ≈ *{ostr}*\n\n"
+        f"Сумма ставки (FUT, {db.WC_BET_MIN_FUT}–{db.WC_BET_MAX_FUT}):",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def _wc_do_bet(q, ctx, uid: int, mid: str, mcb: str, sel: str, amt: int):
+    market = WC_BET_CB_REV.get(mcb)
+    wc, m = _wc_find_match(mid)
+    if not m or not market:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+    ok, err = db.place_wc_bet_fut(uid, mid, market, sel, amt)
+    if not ok:
+        await q.answer(f"❌ {err}", show_alert=True)
+        return
+    mname, sels = db.WC_MARKETS[market]
+    sel_lbl = next((l for c, l in sels if c == sel), sel)
+    pools = db.wc_bet_pools(mid)
+    o     = db.wc_market_odds(pools, market, sel)
+    ostr  = f"{o:.2f}" if o else "—"
+    await q.edit_message_text(
+        f"✅ *Ставка принята!*\n\n"
+        f"{m.get('home_flag','')}{m['home']} — {m.get('away_flag','')}{m['away']}\n"
+        f"{mname}: *{sel_lbl}*\n"
+        f"Сумма: *{amt:,} FUT*\n".replace(",", " ")
+        + f"Текущий коэфф. ≈ *{ostr}*\n\n"
+        f"_Выплата при вводе результата — придёт пуш._",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💸 Ещё ставка", callback_data="fut_wc_bets_0")],
+            [InlineKeyboardButton("🧾 Мои ставки", callback_data="fut_wc_mybets")],
+            [InlineKeyboardButton("◀ ЧМ",         callback_data="fut_wc")],
+        ]),
+    )
+
+
+async def cb_fut_wc_betstake(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_stk_ — ставка пресетной суммой."""
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    mid, mcb, sel, amt = parts[3], parts[4], parts[5], int(parts[6])
+    await _wc_do_bet(q, ctx, q.from_user.id, mid, mcb, sel, amt)
+
+
+async def cb_fut_wc_betcustom(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_bcust_ — ввод своей суммы ставки текстом."""
+    q = update.callback_query
+    await q.answer()
+    parts = q.data.split("_")
+    mid, mcb, sel = parts[2], parts[3], parts[4]
+    market = WC_BET_CB_REV.get(mcb)
+    wc, m = _wc_find_match(mid)
+    if not m or not market:
+        await q.answer("Матч не найден.", show_alert=True)
+        return
+    db.set_pending_action(q.from_user.id, "wc_bet_stake_input",
+                          {"match_id": mid, "mcb": mcb, "selection": sel})
+    await q.edit_message_text(
+        f"✏️ Введи сумму ставки числом ({db.WC_BET_MIN_FUT}–{db.WC_BET_MAX_FUT} FUT):",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data=f"fut_wc_sel_{mid}_{mcb}_{sel}"),
+        ]]),
+    )
+
+
+async def cb_fut_wc_mybets(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """^fut_wc_mybets$ — мои ставки."""
+    q   = update.callback_query
+    await q.answer()
+    bets = db.wc_user_bets(q.from_user.id, "fut", limit=15)
+
+    if not bets:
+        await q.edit_message_text(
+            "🧾 *МОИ СТАВКИ*\n\n_Ставок пока нет._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💸 Сделать ставку", callback_data="fut_wc_bets_0"),
+            ], [InlineKeyboardButton("◀ ЧМ", callback_data="fut_wc")]]),
+        )
+        return
+
+    icon = {"pending": "⏳", "won": "✅", "lost": "❌", "void": "↩️"}
+    lines = []
+    for b in bets:
+        mname, sels = db.WC_MARKETS.get(b["market"], (b["market"], []))
+        sel_lbl = next((l for c, l in sels if c == b["selection"]), b["selection"])
+        st = icon.get(b["status"], "•")
+        tail = (f" → +{b['payout']:,}".replace(",", " ")
+                if b["status"] == "won" else
+                (" → возврат" if b["status"] == "void" else ""))
+        lines.append(f"{st} `{b['match_id']}` {mname}: *{sel_lbl}* "
+                     f"({b['stake']:,} FUT){tail}".replace(",", " "))
+
+    await q.edit_message_text(
+        "🧾 *МОИ СТАВКИ* _(последние)_\n\n" + "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💸 Ставки", callback_data="fut_wc_bets_0")],
+            [InlineKeyboardButton("◀ ЧМ",     callback_data="fut_wc")],
+        ]),
     )
 
 
@@ -8250,6 +8596,14 @@ def fut_handlers() -> list[tuple[str, Any]]:
         ("^fut_wc_teams$",                cb_fut_wc_teams),
         ("^fut_wc_stad$",                 cb_fut_wc_stadiums),
         ("^fut_wc_hist$",                 cb_fut_wc_history),
+        # ── Тотализатор (порядок: специфичные префиксы раньше) ──
+        ("^fut_wc_mybets$",               cb_fut_wc_mybets),
+        ("^fut_wc_bcust_",                cb_fut_wc_betcustom),
+        ("^fut_wc_bm_",                   cb_fut_wc_betmatch),
+        ("^fut_wc_bets_",                 cb_fut_wc_bets),
+        ("^fut_wc_mk_",                   cb_fut_wc_betmarket),
+        ("^fut_wc_sel_",                  cb_fut_wc_betselect),
+        ("^fut_wc_stk_",                  cb_fut_wc_betstake),
         ("^fut_wc_schedule_",             cb_fut_wc_schedule),
         ("^fut_wc_lb_",                   cb_fut_wc_leaderboard),
         ("^fut_wc_mypreds_",              cb_fut_wc_mypreds),
